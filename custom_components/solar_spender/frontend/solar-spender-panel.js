@@ -2850,6 +2850,12 @@ var import_tooltip = __toESM(require_tooltip(), 1);
 function shouldLoadPanel(loaded, loading) {
   return !loaded && !loading;
 }
+function applySelectorValue(options, key, value) {
+  return {
+    ...options,
+    [key]: value || ""
+  };
+}
 function relevantPowerEntityIds(states) {
   return Object.values(states || {}).filter((state) => {
     const unit = state.attributes?.unit_of_measurement;
@@ -2904,7 +2910,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.1.2";
+var PANEL_VERSION = "0.1.3";
 var ENTITY_SELECTORS = {
   binary_entity_id: {
     entity: {
@@ -3026,6 +3032,13 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.hass = this._hass;
       selector.selector = this._entitySelector(key);
       selector.value = this._options[key] || "";
+      selector.addEventListener("value-changed", (event) => {
+        this._options = applySelectorValue(
+          this._options,
+          key,
+          event.detail?.value
+        );
+      });
     });
     this._shadow.querySelectorAll("ha-selector[data-load-index]").forEach((selector) => {
       const index = Number(selector.dataset.loadIndex);
@@ -3102,9 +3115,6 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     });
     options.enabled = form.elements.enabled.value === "true";
     options.grid_export_positive = form.elements.grid_export_positive.value === "true";
-    this._shadow.querySelectorAll("ha-selector[data-key]").forEach((selector) => {
-      options[selector.dataset.key] = selector.value || "";
-    });
     options.loads = [...this._shadow.querySelectorAll("[data-load-row]")].map((row) => {
       const index = Number(row.dataset.loadRow);
       const value = (key) => form.elements[`load_${index}_${key}`].value;

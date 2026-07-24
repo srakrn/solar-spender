@@ -1,6 +1,7 @@
 import bootstrapCss from "bootstrap/dist/css/bootstrap.min.css";
 import Tooltip from "bootstrap/js/dist/tooltip";
 import {
+  applySelectorValue,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
   relevantPowerEntityIds,
@@ -28,7 +29,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.1.2";
+const PANEL_VERSION = "0.1.3";
 
 const ENTITY_SELECTORS = {
   binary_entity_id: {
@@ -152,6 +153,13 @@ class SolarSpenderPanelHost extends HTMLElement {
       selector.hass = this._hass;
       selector.selector = this._entitySelector(key);
       selector.value = this._options[key] || "";
+      selector.addEventListener("value-changed", (event) => {
+        this._options = applySelectorValue(
+          this._options,
+          key,
+          event.detail?.value,
+        );
+      });
     });
     this._shadow.querySelectorAll("ha-selector[data-load-index]").forEach((selector) => {
       const index = Number(selector.dataset.loadIndex);
@@ -227,7 +235,6 @@ class SolarSpenderPanelHost extends HTMLElement {
     ["export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold", "settling_seconds"].forEach((key) => { options[key] = Number(form.elements[key].value); });
     options.enabled = form.elements.enabled.value === "true";
     options.grid_export_positive = form.elements.grid_export_positive.value === "true";
-    this._shadow.querySelectorAll("ha-selector[data-key]").forEach((selector) => { options[selector.dataset.key] = selector.value || ""; });
     options.loads = [...this._shadow.querySelectorAll("[data-load-row]")].map((row) => {
       const index = Number(row.dataset.loadRow);
       const value = (key) => form.elements[`load_${index}_${key}`].value;

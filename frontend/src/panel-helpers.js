@@ -2,6 +2,13 @@ export function shouldLoadPanel(loaded, loading) {
   return !loaded && !loading;
 }
 
+export function applySelectorValue(options, key, value) {
+  return {
+    ...options,
+    [key]: value || "",
+  };
+}
+
 export function relevantPowerEntityIds(states) {
   return Object.values(states || {})
     .filter((state) => {

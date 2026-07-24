@@ -2,11 +2,27 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applySelectorValue,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
   relevantPowerEntityIds,
   shouldLoadPanel,
 } from "./panel-helpers.js";
+
+test("entity selector changes are retained for configuration save", () => {
+  const original = { binary_entity_id: "" };
+  const updated = applySelectorValue(
+    original,
+    "binary_entity_id",
+    "binary_sensor.deye_inverter_solar_system_headroom",
+  );
+
+  assert.equal(original.binary_entity_id, "");
+  assert.equal(
+    updated.binary_entity_id,
+    "binary_sensor.deye_inverter_solar_system_headroom",
+  );
+});
 
 test("live hass updates do not reload an initialized or loading panel", () => {
   assert.equal(shouldLoadPanel(false, false), true);
