@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Solar Spender",
+        "description": "Create Solar Spender. Configure sources and loads from the Solar Spender sidebar panel."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Solar Spender",
+        "description": "Configure Solar Spender from the sidebar panel at {panel}."
+      }
+    }
+  }
+}
