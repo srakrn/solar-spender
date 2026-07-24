@@ -5,6 +5,7 @@ import {
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
   relevantPowerEntityIds,
+  reflectSelectorValue,
   shouldLoadPanel,
   sourceConfigurationVisibility,
   statusPresentations,
@@ -33,7 +34,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.2.2";
+const PANEL_VERSION = "0.2.3";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
@@ -207,7 +208,7 @@ class SolarSpenderPanelHost extends HTMLElement {
             <div class="col-12">${this._batteryConfiguration()}</div>
             <div class="col-12 config-section">
               <div class="row g-3">
-                <div class="col-md-6">${this._numberField("settling_seconds", "AC settling floor", "Fresh source reports count only after this many seconds have elapsed since an AC change. Solar Spender then waits as long as necessary for every source to report.", 0, null, "seconds")}</div>
+                <div class="col-md-6">${this._numberField("settling_seconds", "Wait after an AC change", "After turning an AC on or off, Solar Spender ignores sensor updates for this long. It then waits for a new report before making another change.", 0, null, "seconds")}</div>
               </div>
             </div>
             <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">Climate loads</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender controls only ACs it started itself.</p></div>
@@ -243,6 +244,7 @@ class SolarSpenderPanelHost extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === undefined || value === String(this._options[key])) return;
+        reflectSelectorValue(selector, value);
         const options = this._collectOptions();
         options[key] = key === "enabled" || key === "grid_export_positive"
           ? value === "true"
@@ -261,6 +263,7 @@ class SolarSpenderPanelHost extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === undefined || value === null || value === "") return;
+        reflectSelectorValue(selector, Number(value));
         this._options = {
           ...this._options,
           [key]: Number(value),
@@ -273,10 +276,12 @@ class SolarSpenderPanelHost extends HTMLElement {
       selector.selector = this._entitySelector(key);
       selector.value = this._options[key] || "";
       selector.addEventListener("value-changed", (event) => {
+        const value = event.detail?.value || "";
+        reflectSelectorValue(selector, value);
         this._options = applySelectorValue(
           this._options,
           key,
-          event.detail?.value,
+          value,
         );
       });
     });
@@ -287,8 +292,10 @@ class SolarSpenderPanelHost extends HTMLElement {
       selector.selector = this._entitySelector("load_entity_id");
       selector.value = load.entity_id || "";
       selector.addEventListener("value-changed", (event) => {
+        const value = event.detail?.value || "";
+        reflectSelectorValue(selector, value);
         const options = this._collectOptions();
-        options.loads[index].entity_id = event.detail.value || "";
+        options.loads[index].entity_id = value;
         this._options = options;
         this._render();
       });
@@ -305,6 +312,7 @@ class SolarSpenderPanelHost extends HTMLElement {
         const value = rawValue === undefined || rawValue === null || rawValue === ""
           ? null
           : Number(rawValue);
+        reflectSelectorValue(selector, value);
         this._updateLoadOption(index, key, value);
       });
     });
@@ -330,6 +338,7 @@ class SolarSpenderPanelHost extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === undefined) return;
+        reflectSelectorValue(selector, value);
         this._updateLoadOption(
           index,
           key,

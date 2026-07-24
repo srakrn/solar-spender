@@ -16,6 +16,9 @@ function applySelectorValue(options, key, value) {
     [key]: value || ""
   };
 }
+function reflectSelectorValue(selector, value) {
+  selector.value = value;
+}
 function sourceConfigurationVisibility(sourceType) {
   return {
     binary: sourceType === "binary",
@@ -136,7 +139,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.2.2";
+var PANEL_VERSION = "0.2.3";
 var KEEP_CURRENT = "__keep_current__";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
@@ -306,7 +309,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
             <div class="col-12">${this._batteryConfiguration()}</div>
             <div class="col-12 config-section">
               <div class="row g-3">
-                <div class="col-md-6">${this._numberField("settling_seconds", "AC settling floor", "Fresh source reports count only after this many seconds have elapsed since an AC change. Solar Spender then waits as long as necessary for every source to report.", 0, null, "seconds")}</div>
+                <div class="col-md-6">${this._numberField("settling_seconds", "Wait after an AC change", "After turning an AC on or off, Solar Spender ignores sensor updates for this long. It then waits for a new report before making another change.", 0, null, "seconds")}</div>
               </div>
             </div>
             <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">Climate loads</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender controls only ACs it started itself.</p></div>
@@ -341,6 +344,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === void 0 || value === String(this._options[key])) return;
+        reflectSelectorValue(selector, value);
         const options = this._collectOptions();
         options[key] = key === "enabled" || key === "grid_export_positive" ? value === "true" : value;
         this._options = options;
@@ -357,6 +361,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === void 0 || value === null || value === "") return;
+        reflectSelectorValue(selector, Number(value));
         this._options = {
           ...this._options,
           [key]: Number(value)
@@ -369,10 +374,12 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.selector = this._entitySelector(key);
       selector.value = this._options[key] || "";
       selector.addEventListener("value-changed", (event) => {
+        const value = event.detail?.value || "";
+        reflectSelectorValue(selector, value);
         this._options = applySelectorValue(
           this._options,
           key,
-          event.detail?.value
+          value
         );
       });
     });
@@ -383,8 +390,10 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.selector = this._entitySelector("load_entity_id");
       selector.value = load.entity_id || "";
       selector.addEventListener("value-changed", (event) => {
+        const value = event.detail?.value || "";
+        reflectSelectorValue(selector, value);
         const options = this._collectOptions();
-        options.loads[index].entity_id = event.detail.value || "";
+        options.loads[index].entity_id = value;
         this._options = options;
         this._render();
       });
@@ -399,6 +408,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const rawValue = event.detail?.value;
         const value = rawValue === void 0 || rawValue === null || rawValue === "" ? null : Number(rawValue);
+        reflectSelectorValue(selector, value);
         this._updateLoadOption(index, key, value);
       });
     });
@@ -422,6 +432,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === void 0) return;
+        reflectSelectorValue(selector, value);
         this._updateLoadOption(
           index,
           key,

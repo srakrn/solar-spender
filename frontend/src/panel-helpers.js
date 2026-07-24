@@ -9,6 +9,10 @@ export function applySelectorValue(options, key, value) {
   };
 }
 
+export function reflectSelectorValue(selector, value) {
+  selector.value = value;
+}
+
 export function sourceConfigurationVisibility(sourceType) {
   return {
     binary: sourceType === "binary",

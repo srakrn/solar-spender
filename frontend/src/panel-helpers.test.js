@@ -8,6 +8,7 @@ import {
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
   relevantPowerEntityIds,
+  reflectSelectorValue,
   shouldLoadPanel,
   sourceConfigurationVisibility,
   statusPresentations,
@@ -26,6 +27,14 @@ test("entity selector changes are retained for configuration save", () => {
     updated.binary_entity_id,
     "binary_sensor.deye_inverter_solar_system_headroom",
   );
+});
+
+test("selector changes are reflected immediately in the displayed control", () => {
+  const selector = { value: "" };
+
+  reflectSelectorValue(selector, "sensor.grid_power");
+
+  assert.equal(selector.value, "sensor.grid_power");
 });
 
 test("live hass updates do not reload an initialized or loading panel", () => {
