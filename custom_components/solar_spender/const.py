@@ -7,7 +7,7 @@ from typing import Final
 DOMAIN: Final = "solar_spender"
 PLATFORMS: Final[list[str]] = []
 
-PANEL_VERSION: Final = "0.1.4"
+PANEL_VERSION: Final = "0.2.0"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
@@ -84,3 +84,4 @@ STATE_SPENDING: Final = "spending"
 STATE_SHEDDING: Final = "shedding"
 STATE_PROBING: Final = "probing"
 STATE_BLOCKED_BATTERY: Final = "blocked_battery"
+STATE_WAITING_FEEDBACK: Final = "waiting_feedback"

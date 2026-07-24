@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import logging
 from typing import Any
 
-from homeassistant.const import ATTR_TEMPERATURE, STATE_OFF, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.const import (
+    ATTR_TEMPERATURE,
+    EVENT_STATE_REPORTED,
+    STATE_OFF,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
@@ -26,10 +32,11 @@ from .const import (
     STATE_PROBING,
     STATE_SHEDDING,
     STATE_SPENDING,
+    STATE_WAITING_FEEDBACK,
 )
+from .feedback import CycleMemory, FeedbackBarrier
 from .models import LoadConfig, SolarSpenderConfig
 
-_LOGGER = logging.getLogger(__name__)
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE}
 
 
@@ -60,18 +67,34 @@ class SolarSpenderController:
         self._leases: dict[str, Lease] = {}
         self._last_off: dict[str, datetime] = {}
         self._pending_activation: tuple[LoadConfig, dict[str, Any], dict[str, Any]] | None = None
+        self._feedback_entity_ids = self._feedback_entities()
+        self._feedback_reports: dict[str, datetime] = {}
+        self._feedback_barrier: FeedbackBarrier | None = None
+        self._cycle_memory = CycleMemory()
+        self._pending_unsupported_release: str | None = None
         self._settling_until: datetime | None = None
-        self._unsubscribers: list[callback] = []
-        self._scheduled: callback | None = None
+        self._unsubscribers: list[Callable[[], None]] = []
+        self._scheduled: Callable[[], None] | None = None
         self._reconciling = False
         self._event_history: list[dict[str, str]] = []
 
     async def async_start(self) -> None:
         """Subscribe to all configured entities and evaluate initial state."""
         entity_ids = self._watched_entities()
+        for entity_id in self._feedback_entity_ids:
+            if (state := self.hass.states.get(entity_id)) is not None:
+                self._feedback_reports[entity_id] = state.last_reported
         if entity_ids:
             self._unsubscribers.append(
                 async_track_state_change_event(self.hass, entity_ids, self._async_state_changed)
+            )
+        if self._feedback_entity_ids:
+            self._unsubscribers.append(
+                self.hass.bus.async_listen(
+                    EVENT_STATE_REPORTED,
+                    self._async_state_reported,
+                    event_filter=self._is_feedback_report,
+                )
             )
         await self.async_reconcile("started")
 
@@ -87,7 +110,26 @@ class SolarSpenderController:
     @callback
     def _async_state_changed(self, event: Event) -> None:
         entity_id = event.data["entity_id"]
+        if entity_id in self._feedback_entity_ids:
+            new_state = event.data.get("new_state")
+            reported_at = (
+                new_state.last_updated
+                if new_state is not None
+                else datetime.now().astimezone()
+            )
+            self._feedback_reports[entity_id] = reported_at
         self.hass.async_create_task(self.async_reconcile(f"state changed: {entity_id}"))
+
+    @callback
+    def _is_feedback_report(self, event_data: dict[str, Any]) -> bool:
+        """Limit the high-volume state_reported event to configured feedback."""
+        return event_data.get("entity_id") in self._feedback_entity_ids
+
+    @callback
+    def _async_state_reported(self, event: Event) -> None:
+        entity_id = event.data["entity_id"]
+        self._feedback_reports[entity_id] = event.data["last_reported"]
+        self.hass.async_create_task(self.async_reconcile(f"state reported: {entity_id}"))
 
     def _watched_entities(self) -> set[str]:
         config = self.config
@@ -101,6 +143,27 @@ class SolarSpenderController:
             *(load.entity_id for load in config.loads),
         }
         return {value for value in values if value}
+
+    def _feedback_entities(self) -> frozenset[str]:
+        """Return entities that must report freshly after every load change."""
+        config = self.config
+        if config.source_type == SOURCE_BINARY:
+            values = {config.binary_entity_id}
+        elif config.source_type == SOURCE_GRID:
+            values = {config.grid_entity_id}
+        else:
+            values = {
+                config.production_entity_id,
+                config.consumption_entity_id,
+            }
+        if config.battery_policy != BATTERY_DISABLED:
+            values.add(config.battery_status_entity_id)
+        if config.battery_policy in {
+            BATTERY_CHARGING_OR_SOC,
+            BATTERY_FULL_IDLE_FOR_PROBE,
+        }:
+            values.add(config.battery_soc_entity_id)
+        return frozenset(value for value in values if value)
 
     async def async_reconcile(self, reason: str) -> None:
         """Apply one safe controller decision from the latest Home Assistant state."""
@@ -118,6 +181,65 @@ class SolarSpenderController:
             if not self.config.enabled:
                 self._set_state(STATE_DISABLED, "disabled")
                 return
+            if self._feedback_barrier is not None:
+                barrier = self._feedback_barrier
+                pending_reports = barrier.pending_entities(self._feedback_reports)
+                if pending_reports:
+                    self._set_state(
+                        STATE_WAITING_FEEDBACK,
+                        "waiting for fresh feedback: "
+                        + ", ".join(sorted(pending_reports)),
+                    )
+                    return
+                self._feedback_barrier = None
+                self._record(
+                    f"Fresh feedback confirmed after {barrier.action} of "
+                    f"{barrier.load_entity_id}"
+                )
+                if barrier.action == "activation" and not self.surplus_available:
+                    self._cycle_memory.mark_unsupported(barrier.load_entity_id)
+                    self._pending_unsupported_release = barrier.load_entity_id
+                    self._record(
+                        f"Blocked {barrier.load_entity_id} for this cycle: "
+                        "fresh feedback showed no surplus"
+                    )
+                    await self._async_shed_one(
+                        "activation was not supported by fresh feedback",
+                        target_entity_id=barrier.load_entity_id,
+                    )
+                    return
+                if (
+                    barrier.action == "activation"
+                    and self.config.source_type == SOURCE_CURTAILED
+                    and not self.battery_allowed
+                ):
+                    self._cycle_memory.mark_unsupported(barrier.load_entity_id)
+                    self._pending_unsupported_release = barrier.load_entity_id
+                    self._record(
+                        f"Blocked {barrier.load_entity_id} for this cycle: "
+                        "battery gate closed after activation"
+                    )
+                    await self._async_shed_one(
+                        "battery did not support the probe",
+                        target_entity_id=barrier.load_entity_id,
+                    )
+                    return
+            if self._pending_unsupported_release is not None:
+                if self._pending_unsupported_release not in self._leases:
+                    self._pending_unsupported_release = None
+                else:
+                    await self._async_shed_one(
+                        "releasing unsupported activation",
+                        target_entity_id=self._pending_unsupported_release,
+                    )
+                    return
+            if self._cycle_memory.reset_if_cycle_ended(
+                len(self._leases),
+                self._pending_activation is not None,
+                self.surplus_available,
+                self._feedback_barrier is not None,
+            ):
+                self._record("Cleared unsupported-load memory after surplus ended")
             if not self.battery_allowed:
                 if self.state == STATE_PROBING:
                     await self._async_shed_one("battery discharging during probe")
@@ -245,7 +367,15 @@ class SolarSpenderController:
             return
         candidate = self._next_eligible_load()
         if candidate is None:
-            self._set_state(STATE_SPENDING if self._leases else STATE_MONITORING, "no eligible load")
+            no_load_reason = (
+                "remaining loads blocked for current cycle"
+                if self._cycle_memory.blocked_loads
+                else "no eligible load"
+            )
+            self._set_state(
+                STATE_SPENDING if self._leases else STATE_MONITORING,
+                no_load_reason,
+            )
             return
         if self.config.source_type != SOURCE_CURTAILED and (
             candidate.expected_power_w is not None
@@ -264,7 +394,11 @@ class SolarSpenderController:
         now = datetime.now().astimezone()
         candidates: list[LoadConfig] = []
         for load in self.config.loads:
-            if not load.enabled or load.entity_id in self._leases:
+            if (
+                not load.enabled
+                or load.entity_id in self._leases
+                or load.entity_id in self._cycle_memory.blocked_loads
+            ):
                 continue
             state = self.hass.states.get(load.entity_id)
             if state is None or state.state in _INVALID_STATES or state.state != STATE_OFF:
@@ -302,6 +436,12 @@ class SolarSpenderController:
             )
             profile["fan_mode"] = load.fan_mode
         self._pending_activation = (load, profile, previous_profile)
+        action_completed_at = datetime.now().astimezone()
+        self._begin_feedback_barrier(
+            "activation",
+            load.entity_id,
+            action_completed_at,
+        )
         self._record(f"Awaiting activation confirmation for {load.entity_id}")
         self._schedule_reconcile(self.config.settling_seconds)
 
@@ -314,6 +454,12 @@ class SolarSpenderController:
         state = self.hass.states.get(load.entity_id)
         if state is None or state.state in _INVALID_STATES or state.state == STATE_OFF:
             self._last_off[load.entity_id] = datetime.now().astimezone()
+            if (
+                self._feedback_barrier is not None
+                and self._feedback_barrier.action == "activation"
+                and self._feedback_barrier.load_entity_id == load.entity_id
+            ):
+                self._feedback_barrier = None
             self._record(f"Activation was not confirmed for {load.entity_id}")
             return
         self._leases[load.entity_id] = Lease(
@@ -324,23 +470,45 @@ class SolarSpenderController:
         )
         self._record(f"Activated {load.entity_id}")
 
-    async def _async_shed_one(self, reason: str) -> None:
+    async def _async_shed_one(
+        self,
+        reason: str,
+        target_entity_id: str | None = None,
+    ) -> None:
         now = datetime.now().astimezone()
+        considered = list(self._leases.values())
+        if target_entity_id is not None:
+            target = self._leases.get(target_entity_id)
+            if target is None:
+                self._record(
+                    f"Could not release {target_entity_id}: ownership was relinquished"
+                )
+                if self._pending_unsupported_release == target_entity_id:
+                    self._pending_unsupported_release = None
+                return
+            considered = [target]
         eligible = [
             lease
-            for lease in self._leases.values()
+            for lease in considered
             if now >= lease.activated_at + timedelta(seconds=lease.load.min_on_seconds)
         ]
         if not eligible:
             self._set_state(STATE_SHEDDING, "waiting for minimum-on deadline")
             deadlines = [
                 lease.activated_at + timedelta(seconds=lease.load.min_on_seconds)
-                for lease in self._leases.values()
+                for lease in considered
             ]
             if deadlines:
                 self._schedule_reconcile(max(0, (min(deadlines) - now).total_seconds()))
             return
-        lease = max(eligible, key=lambda item: (item.load.priority, -item.load.utility))
+        lease = (
+            eligible[0]
+            if target_entity_id is not None
+            else max(
+                eligible,
+                key=lambda item: (item.load.priority, -item.load.utility),
+            )
+        )
         self._set_state(STATE_SHEDDING, f"releasing {lease.load.entity_id}: {reason}")
         try:
             await self.hass.services.async_call(
@@ -352,9 +520,37 @@ class SolarSpenderController:
             return
         await self._async_restore_profile(lease)
         self._leases.pop(lease.load.entity_id, None)
+        if self._pending_unsupported_release == lease.load.entity_id:
+            self._pending_unsupported_release = None
         self._last_off[lease.load.entity_id] = now
         self._record(f"Released {lease.load.entity_id}: {reason}")
+        self._begin_feedback_barrier(
+            "release",
+            lease.load.entity_id,
+            datetime.now().astimezone(),
+        )
         self._schedule_reconcile(self.config.settling_seconds)
+
+    def _begin_feedback_barrier(
+        self,
+        action: str,
+        load_entity_id: str,
+        action_completed_at: datetime,
+    ) -> None:
+        """Prevent another load change until post-settling reports arrive."""
+        not_before = action_completed_at + timedelta(
+            seconds=self.config.settling_seconds
+        )
+        self._feedback_barrier = FeedbackBarrier(
+            action=action,
+            load_entity_id=load_entity_id,
+            not_before=not_before,
+            required_entities=self._feedback_entity_ids,
+        )
+        self._record(
+            f"Feedback barrier for {load_entity_id}; reports must be newer than "
+            f"{not_before.isoformat()}"
+        )
 
     def _capture_profile(self, entity_id: str) -> dict[str, Any]:
         """Capture only fields Solar Spender may later change."""
@@ -412,6 +608,22 @@ class SolarSpenderController:
             if lease.load.fan_mode is not None and state.attributes.get("fan_mode") != lease.load.fan_mode:
                 self._leases.pop(entity_id, None)
                 self._record(f"Relinquished {entity_id}: fan mode changed")
+        if (
+            self._feedback_barrier is not None
+            and self._feedback_barrier.action == "activation"
+            and self._feedback_barrier.load_entity_id not in self._leases
+            and self._pending_activation is None
+        ):
+            self._record(
+                f"Cancelled feedback barrier for "
+                f"{self._feedback_barrier.load_entity_id}: no longer owned"
+            )
+            self._feedback_barrier = None
+        if (
+            self._pending_unsupported_release is not None
+            and self._pending_unsupported_release not in self._leases
+        ):
+            self._pending_unsupported_release = None
 
     def _schedule_reconcile(self, seconds: float) -> None:
         if self._scheduled is not None:
@@ -436,6 +648,12 @@ class SolarSpenderController:
 
     def status(self) -> dict[str, Any]:
         """Return a frontend-safe controller snapshot."""
+        feedback_barrier = self._feedback_barrier
+        pending_feedback = (
+            feedback_barrier.pending_entities(self._feedback_reports)
+            if feedback_barrier is not None
+            else frozenset()
+        )
         return {
             "entry_id": self.entry_id,
             "state": self.state,
@@ -451,11 +669,33 @@ class SolarSpenderController:
             "pending_activation": self._pending_activation[0].entity_id
             if self._pending_activation is not None
             else None,
+            "feedback": {
+                "waiting": feedback_barrier is not None,
+                "action": feedback_barrier.action
+                if feedback_barrier is not None
+                else None,
+                "load_entity_id": feedback_barrier.load_entity_id
+                if feedback_barrier is not None
+                else None,
+                "not_before": feedback_barrier.not_before.isoformat()
+                if feedback_barrier is not None
+                else None,
+                "pending_entities": sorted(pending_feedback),
+                "last_reports": {
+                    entity_id: reported_at.isoformat()
+                    for entity_id, reported_at in self._feedback_reports.items()
+                },
+            },
+            "blocked_loads": sorted(self._cycle_memory.blocked_loads),
+            "pending_unsupported_release": self._pending_unsupported_release,
             "loads": [
                 {
                     "entity_id": load.entity_id,
                     "enabled": load.enabled,
                     "owned": load.entity_id in self._leases,
+                    "blocked_for_cycle": (
+                        load.entity_id in self._cycle_memory.blocked_loads
+                    ),
                     "state": self.hass.states.get(load.entity_id).state
                     if self.hass.states.get(load.entity_id)
                     else None,

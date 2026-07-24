@@ -237,18 +237,28 @@ These are safety requirements, not implementation suggestions:
 - One failed load must not stop reconciliation of other loads.
 - Use deterministic priority order. Activate highest priority first and release
   lowest priority first; break ties by stable configuration order.
-- Activate one load at a time, confirm its resulting state, wait for measurement
-  settling, and re-evaluate before activating another.
+- Activate one load at a time, confirm its resulting state, and wait for fresh
+  post-settling feedback before activating another.
 - In curtailed-production mode, never activate a second probe until the first
   has settled and been classified as supported or rolled back.
 - In `full_idle_for_probe` mode, re-check SOC and battery direction immediately
   before activation. Battery discharge during the probe makes it unsupported.
+- A settling timer never authorizes another load change by itself. After every
+  activation or release, wait until every configured source and battery
+  feedback entity has reported again after the settling floor. Track unchanged
+  reports through Home Assistant's entity-filtered `state_reported` event.
+- If fresh feedback shows that a newly activated load exhausted surplus,
+  release that specific load when minimum-on permits and block it for the
+  remainder of the current spending cycle. Do not treat headroom returning
+  because that load was removed as a new opportunity. Clear the block only
+  after fresh feedback observes no surplus while no load is owned.
 - For numeric sources, enter surplus only at/above the entry threshold and
   remain latched until at/below the exit threshold. Require
   `entry_threshold > exit_threshold`.
 - Invalid source data clears the surplus latch.
 - When surplus is lost, release the lowest-priority owned load whose minimum-on
-  time has elapsed. Confirm it, wait for measurement settling, then re-evaluate.
+  time has elapsed. Confirm it, then wait for fresh post-settling feedback
+  before re-evaluating.
 - If every owned load is still inside minimum-on time, schedule reconciliation
   for the earliest eligibility deadline.
 - If surplus returns before release, cancel the pending reconciliation.
@@ -269,8 +279,8 @@ status.
 
 The behavioral states are:
 
-`DISABLED`, `MONITORING`, `SPENDING`, `SHEDDING`, `PROBING`, and
-`BLOCKED_BATTERY`.
+`DISABLED`, `MONITORING`, `SPENDING`, `SHEDDING`, `PROBING`,
+`WAITING_FEEDBACK`, and `BLOCKED_BATTERY`.
 
 Represent transitions in one controller and document every transition in tests.
 Avoid scattered callbacks that each mutate timers and ownership.

@@ -266,12 +266,15 @@ MONITORING
 SPENDING
   ├─ source false/invalid ────> SHEDDING
   ├─ next curtailed candidate ─> PROBING
-  └─ after each settled action > SPENDING (re-evaluate)
+  └─ after each load change ───> WAITING_FEEDBACK
 
 PROBING
-  ├─ supported ──────────────> SPENDING
-  ├─ unsupported ────────────> release safely, then SPENDING with backoff
-  └─ source false/invalid ───> release safely, then SHEDDING
+  └─ after activation ─────────> WAITING_FEEDBACK
+
+WAITING_FEEDBACK
+  ├─ all sources report fresh + supported ─> SPENDING
+  ├─ fresh feedback unsupported ───────────> release candidate safely
+  └─ reports still cached/stale ───────────> remain waiting
 
 SHEDDING
   ├─ source recovers ────────> SPENDING
@@ -292,8 +295,17 @@ Clarifications:
   source still determines gradual shedding; this avoids abrupt comfort changes.
 - Numeric-source hysteresis is the only source debounce: the surplus latch opens
   at the entry threshold and closes at the lower exit threshold.
+- A settling timer never authorizes another load change by itself. After every
+  activation or release, each configured source and battery-feedback entity
+  must produce a new Home Assistant report after the settling floor. Unchanged
+  values count only through Home Assistant's filtered `state_reported` event.
+- If fresh post-activation feedback loses surplus, release the just-added load
+  and block that load for the rest of the current opportunity. Removing it and
+  seeing the same binary headroom signal return does not re-arm it. Clear the
+  block only after fresh feedback observes no surplus while no load is owned.
 - On loss, release the lowest-priority owned load as soon as its minimum-on time
-  allows. Confirm the change and wait for measurement settling before another.
+  allows. Confirm the change and wait for fresh post-settling feedback before
+  another.
 - If surplus returns while waiting for minimum-on eligibility, cancel shedding.
 - A load still inside minimum-on or minimum-off time remains ineligible and the
   controller reports its deadline.
@@ -356,6 +368,9 @@ Status includes:
 - raw source value and hysteresis-latched surplus decision;
 - normalized input values and computed headroom;
 - battery gate result and reason;
+- feedback-barrier action, earliest acceptable report time, pending entities,
+  and their last report times;
+- loads blocked as unsupported for the current spending cycle;
 - active deadlines/countdowns;
 - configured load eligibility and ownership;
 - last command/result per load;

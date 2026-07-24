@@ -31,7 +31,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.1.4";
+const PANEL_VERSION = "0.2.0";
 
 const SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
@@ -193,6 +193,7 @@ class SolarSpenderPanelHost extends HTMLElement {
       return;
     }
     const status = this._status || {};
+    const feedback = status.feedback || {};
     app.innerHTML = `
       <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
         <div><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Use spare solar power for climate loads.</p></div>
@@ -202,6 +203,13 @@ class SolarSpenderPanelHost extends HTMLElement {
         ${this._card("Controller", status.state || "Not configured", status.reason || "")}
         ${this._card("Surplus", status.surplus_available ? "Available" : "Unavailable", this._watts(status.headroom_w))}
         ${this._card("Battery gate", status.battery_allowed ? "Open" : "Closed", "")}
+        ${this._card(
+          "Feedback",
+          feedback.waiting ? "Waiting for fresh data" : "Ready",
+          feedback.waiting
+            ? (feedback.pending_entities || []).join(", ")
+            : `${Object.keys(feedback.last_reports || {}).length} source reports tracked`,
+        )}
         ${this._card("Owned ACs", String(status.owned_loads?.length || 0), "Only these can be released automatically")}
       </div>
       <div class="row g-3">
@@ -214,7 +222,7 @@ class SolarSpenderPanelHost extends HTMLElement {
             <div class="col-12">${this._batteryConfiguration()}</div>
             <div class="col-12 config-section">
               <div class="row g-3">
-                <div class="col-md-6">${this._numberField("settling_seconds", "Measurement settling", "Seconds to wait after an AC change before making the next decision.", 0, null, "seconds")}</div>
+                <div class="col-md-6">${this._numberField("settling_seconds", "AC settling floor", "Fresh source reports count only after this many seconds have elapsed since an AC change. Solar Spender then waits as long as necessary for every source to report.", 0, null, "seconds")}</div>
               </div>
             </div>
             <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">Climate loads</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender controls only ACs it started itself.</p></div>
@@ -468,8 +476,17 @@ class SolarSpenderPanelHost extends HTMLElement {
   _loadSelect(index, key, label, help, options) { return `${this._label(label, help)}<select class="form-select" name="load_${index}_${key}">${options.map(([value, text]) => `<option value="${value}">${text}</option>`).join("")}</select>`; }
   _activateTooltips() { this._tooltips = [...this._shadow.querySelectorAll('[data-bs-toggle="tooltip"]')].map((element) => new Tooltip(element)); }
   _disposeTooltips() { this._tooltips.forEach((tooltip) => tooltip.dispose()); this._tooltips = []; }
-  _card(title, value, detail) { return `<div class="col-12 col-sm-6 col-xl-3"><ha-card class="status-card"><div class="card-content"><div class="text-body-secondary small">${this._escape(title)}</div><div class="fs-4 fw-semibold">${this._escape(value)}</div><div class="small text-body-secondary">${this._escape(detail)}</div></div></ha-card></div>`; }
-  _loads(loads) { return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => `<li class="list-group-item px-0 d-flex justify-content-between"><span>${this._escape(load.entity_id)}</span><span class="badge text-bg-${load.owned ? "success" : "secondary"}">${load.owned ? "Owned" : this._escape(load.state || "unknown")}</span></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`; }
+  _card(title, value, detail) { return `<div class="col-12 col-sm-6 col-xl"><ha-card class="status-card"><div class="card-content"><div class="text-body-secondary small">${this._escape(title)}</div><div class="fs-4 fw-semibold">${this._escape(value)}</div><div class="small text-body-secondary text-break">${this._escape(detail)}</div></div></ha-card></div>`; }
+  _loads(loads) { return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => {
+    const badge = load.blocked_for_cycle && load.owned
+      ? ["warning", "Owned · release pending"]
+      : load.blocked_for_cycle
+        ? ["warning", "Blocked this cycle"]
+      : load.owned
+        ? ["success", "Owned"]
+        : ["secondary", load.state || "unknown"];
+    return `<li class="list-group-item px-0 d-flex justify-content-between gap-2"><span class="text-break">${this._escape(load.entity_id)}</span><span class="badge text-bg-${badge[0]}">${this._escape(badge[1])}</span></li>`;
+  }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`; }
   _history(history) { return history.length ? `<ul class="list-group list-group-flush">${history.slice().reverse().map((item) => `<li class="list-group-item px-0 small"><div>${this._escape(item.message)}</div><div class="text-body-secondary">${this._escape(item.at)}</div></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No decisions yet.</p>`; }
   _watts(value) { return typeof value === "number" ? `${Math.round(value)} W` : "—"; }
   _escape(value) { return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]); }
