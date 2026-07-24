@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from homeassistant.const import ATTR_TEMPERATURE
@@ -16,6 +17,8 @@ from .const import (
     CONF_BATTERY_SOC_ENTITY_ID,
     CONF_BATTERY_STATUS_ENTITY_ID,
     CONF_BINARY_ENTITY_ID,
+    CONF_BINARY_OFF_DELAY_MINUTES,
+    CONF_BINARY_ON_DELAY_MINUTES,
     CONF_CHARGING_STATES,
     CONF_CONSUMPTION_ENTITY_ID,
     CONF_DISCHARGING_STATES,
@@ -96,6 +99,8 @@ class SolarSpenderConfig:
     enabled: bool
     source_type: str
     binary_entity_id: str
+    binary_on_delay_minutes: float
+    binary_off_delay_minutes: float
     grid_entity_id: str
     grid_export_positive: bool
     production_entity_id: str
@@ -128,6 +133,17 @@ class SolarSpenderConfig:
         settling = int(merged[CONF_SETTLING_SECONDS])
         if settling < 0:
             raise ConfigurationError("settling_seconds must not be negative")
+        binary_on_delay = float(merged[CONF_BINARY_ON_DELAY_MINUTES])
+        binary_off_delay = float(merged[CONF_BINARY_OFF_DELAY_MINUTES])
+        if (
+            not isfinite(binary_on_delay)
+            or not isfinite(binary_off_delay)
+            or binary_on_delay < 0
+            or binary_off_delay < 0
+        ):
+            raise ConfigurationError(
+                "binary debounce durations must be finite and not negative"
+            )
         loads = tuple(LoadConfig.from_dict(item) for item in merged[CONF_LOADS])
         entity_ids = [load.entity_id for load in loads]
         if len(entity_ids) != len(set(entity_ids)):
@@ -139,6 +155,8 @@ class SolarSpenderConfig:
             enabled=bool(merged[CONF_ENABLED]),
             source_type=source_type,
             binary_entity_id=str(merged[CONF_BINARY_ENTITY_ID]),
+            binary_on_delay_minutes=binary_on_delay,
+            binary_off_delay_minutes=binary_off_delay,
             grid_entity_id=str(merged[CONF_GRID_ENTITY_ID]),
             grid_export_positive=bool(merged[CONF_GRID_EXPORT_POSITIVE]),
             production_entity_id=str(merged[CONF_PRODUCTION_ENTITY_ID]),

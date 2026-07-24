@@ -7,7 +7,7 @@ from typing import Final
 DOMAIN: Final = "solar_spender"
 PLATFORMS: Final[list[str]] = []
 
-PANEL_VERSION: Final = "0.2.0"
+PANEL_VERSION: Final = "0.2.1"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
@@ -19,6 +19,8 @@ DATA_PANEL_REGISTERED: Final = "panel_registered"
 CONF_ENABLED: Final = "enabled"
 CONF_SOURCE_TYPE: Final = "source_type"
 CONF_BINARY_ENTITY_ID: Final = "binary_entity_id"
+CONF_BINARY_ON_DELAY_MINUTES: Final = "binary_on_delay_minutes"
+CONF_BINARY_OFF_DELAY_MINUTES: Final = "binary_off_delay_minutes"
 CONF_GRID_ENTITY_ID: Final = "grid_entity_id"
 CONF_GRID_EXPORT_POSITIVE: Final = "grid_export_positive"
 CONF_PRODUCTION_ENTITY_ID: Final = "production_entity_id"
@@ -61,6 +63,8 @@ DEFAULT_OPTIONS: Final = {
     CONF_ENABLED: False,
     CONF_SOURCE_TYPE: SOURCE_BINARY,
     CONF_BINARY_ENTITY_ID: "",
+    CONF_BINARY_ON_DELAY_MINUTES: 0.0,
+    CONF_BINARY_OFF_DELAY_MINUTES: 0.0,
     CONF_GRID_ENTITY_ID: "",
     CONF_GRID_EXPORT_POSITIVE: True,
     CONF_PRODUCTION_ENTITY_ID: "",

@@ -39,6 +39,8 @@ valid source and load options are saved and automation is enabled.
 ## Current safety model
 
 - Numeric sources use entry/exit hysteresis.
+- Binary sources have independently configurable continuous-on and
+  continuous-off debounce durations; a bounce resets the deadline.
 - Each climate load has independent minimum-on and minimum-off durations.
 - Solar Spender starts one load, confirms it, and then waits for every relevant
   source to produce a fresh report after the configured settling floor.

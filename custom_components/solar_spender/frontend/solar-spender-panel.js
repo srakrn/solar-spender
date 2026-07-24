@@ -2909,6 +2909,8 @@ var DEFAULT_OPTIONS = {
   enabled: false,
   source_type: "binary",
   binary_entity_id: "",
+  binary_on_delay_minutes: 0,
+  binary_off_delay_minutes: 0,
   grid_entity_id: "",
   grid_export_positive: true,
   production_entity_id: "",
@@ -2925,7 +2927,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.2.0";
+var PANEL_VERSION = "0.2.1";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
   source_type: [
@@ -3093,7 +3095,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       </div>
       <div class="row g-3 mb-3">
         ${this._card("Controller", status.state || "Not configured", status.reason || "")}
-        ${this._card("Surplus", status.surplus_available ? "Available" : "Unavailable", this._watts(status.headroom_w))}
+        ${this._card("Surplus", status.surplus_available ? "Available" : "Unavailable", this._surplusDetail(status))}
         ${this._card("Battery gate", status.battery_allowed ? "Open" : "Closed", "")}
         ${this._card(
       "Feedback",
@@ -3221,7 +3223,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   }
   _fillStandardFields() {
     const form = this._shadow.querySelector("#settings");
-    ["export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold", "settling_seconds"].forEach((key) => {
+    ["binary_on_delay_minutes", "binary_off_delay_minutes", "export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold", "settling_seconds"].forEach((key) => {
       if (form.elements[key]) form.elements[key].value = String(this._options[key]);
     });
     this._options.loads.forEach((load, index) => {
@@ -3234,7 +3236,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   _collectOptions() {
     const form = this._shadow.querySelector("#settings");
     const options = { ...this._options };
-    ["export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold", "settling_seconds"].forEach((key) => {
+    ["binary_on_delay_minutes", "binary_off_delay_minutes", "export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold", "settling_seconds"].forEach((key) => {
       if (form.elements[key]) options[key] = Number(form.elements[key].value);
     });
     options.loads = [...this._shadow.querySelectorAll("[data-load-row]")].map((row) => {
@@ -3290,7 +3292,9 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     let fields;
     if (visibility.binary) {
       fields = `
-        <div class="col-12">${this._entityField("binary_entity_id", "Headroom entity", "On means spare solar is available. The upstream entity is responsible for deciding when headroom exists.")}</div>`;
+        <div class="col-12">${this._entityField("binary_entity_id", "Headroom entity", "On means spare solar is available. Unknown and unavailable fail closed immediately.")}</div>
+        <div class="col-md-6">${this._numberField("binary_on_delay_minutes", "On debounce", "The headroom entity must remain continuously on for this many minutes before Solar Spender may activate a load.", 0, null, "minutes")}</div>
+        <div class="col-md-6">${this._numberField("binary_off_delay_minutes", "Off debounce", "The headroom entity must remain continuously off for this many minutes before Solar Spender begins releasing owned loads.", 0, null, "minutes")}</div>`;
     } else if (visibility.grid) {
       fields = `
         <div class="col-md-6">${this._entityField("grid_entity_id", "Grid-flow entity", "A measurement power sensor that reports import and export in W or kW.")}</div>
@@ -3394,6 +3398,13 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   }
   _watts(value) {
     return typeof value === "number" ? `${Math.round(value)} W` : "\u2014";
+  }
+  _surplusDetail(status) {
+    if (typeof status.raw_source_value === "string" && status.headroom_w === null) {
+      const pending = status.binary_debounce_until ? ` \xB7 debounce until ${status.binary_debounce_until}` : "";
+      return `Raw: ${status.raw_source_value}${pending}`;
+    }
+    return this._watts(status.headroom_w);
   }
   _escape(value) {
     return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);

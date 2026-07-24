@@ -34,7 +34,7 @@ from .const import (
     STATE_SPENDING,
     STATE_WAITING_FEEDBACK,
 )
-from .feedback import CycleMemory, FeedbackBarrier
+from .feedback import CycleMemory, FeedbackBarrier, debounce_binary_source
 from .models import LoadConfig, SolarSpenderConfig
 
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE}
@@ -63,6 +63,8 @@ class SolarSpenderController:
         self.surplus_available = False
         self.battery_allowed = config.battery_policy == BATTERY_DISABLED
         self.reason = "disabled" if not config.enabled else "awaiting source"
+        self.raw_source_value: str | float | None = None
+        self.source_valid = False
         self.headroom_w: float | None = None
         self._leases: dict[str, Lease] = {}
         self._last_off: dict[str, datetime] = {}
@@ -72,6 +74,8 @@ class SolarSpenderController:
         self._feedback_barrier: FeedbackBarrier | None = None
         self._cycle_memory = CycleMemory()
         self._pending_unsupported_release: str | None = None
+        self._binary_debounce_until: datetime | None = None
+        self._binary_debounce_scheduled: Callable[[], None] | None = None
         self._settling_until: datetime | None = None
         self._unsubscribers: list[Callable[[], None]] = []
         self._scheduled: Callable[[], None] | None = None
@@ -106,6 +110,9 @@ class SolarSpenderController:
         if self._scheduled is not None:
             self._scheduled()
             self._scheduled = None
+        if self._binary_debounce_scheduled is not None:
+            self._binary_debounce_scheduled()
+            self._binary_debounce_scheduled = None
 
     @callback
     def _async_state_changed(self, event: Event) -> None:
@@ -181,6 +188,11 @@ class SolarSpenderController:
             if not self.config.enabled:
                 self._set_state(STATE_DISABLED, "disabled")
                 return
+            if self._feedback_barrier is not None and not self.source_valid:
+                self._record(
+                    "Cancelled feedback barrier because the source became invalid"
+                )
+                self._feedback_barrier = None
             if self._feedback_barrier is not None:
                 barrier = self._feedback_barrier
                 pending_reports = barrier.pending_entities(self._feedback_reports)
@@ -189,6 +201,12 @@ class SolarSpenderController:
                         STATE_WAITING_FEEDBACK,
                         "waiting for fresh feedback: "
                         + ", ".join(sorted(pending_reports)),
+                    )
+                    return
+                if self._binary_debounce_until is not None:
+                    self._set_state(
+                        STATE_WAITING_FEEDBACK,
+                        self.reason,
                     )
                     return
                 self._feedback_barrier = None
@@ -240,6 +258,12 @@ class SolarSpenderController:
                 self._feedback_barrier is not None,
             ):
                 self._record("Cleared unsupported-load memory after surplus ended")
+            if self._binary_debounce_until is not None:
+                self._set_state(
+                    STATE_SPENDING if self._leases else STATE_MONITORING,
+                    self.reason,
+                )
+                return
             if not self.battery_allowed:
                 if self.state == STATE_PROBING:
                     await self._async_shed_one("battery discharging during probe")
@@ -267,23 +291,67 @@ class SolarSpenderController:
         if config.source_type == SOURCE_BINARY:
             state = self.hass.states.get(config.binary_entity_id)
             self.headroom_w = None
-            self.surplus_available = state is not None and state.state.lower() in {"on", "true", "1"}
-            self.reason = "binary headroom on" if self.surplus_available else "binary headroom off"
+            self.raw_source_value = state.state if state is not None else None
+            if (
+                state is None
+                or state.state in _INVALID_STATES
+                or state.state.lower() not in {"on", "off", "true", "false", "1", "0"}
+            ):
+                self.source_valid = False
+                self.surplus_available = False
+                self._clear_binary_debounce()
+                self.reason = "binary headroom unavailable or invalid"
+                return
+            self.source_valid = True
+            raw_on = state.state.lower() in {"on", "true", "1"}
+            now = datetime.now().astimezone()
+            decision = debounce_binary_source(
+                surplus_available=self.surplus_available,
+                raw_on=raw_on,
+                raw_changed_at=state.last_changed,
+                now=now,
+                on_delay_minutes=config.binary_on_delay_minutes,
+                off_delay_minutes=config.binary_off_delay_minutes,
+            )
+            self.surplus_available = decision.surplus_available
+            self._binary_debounce_until = decision.pending_until
+            if decision.pending_until is not None:
+                self._schedule_binary_debounce(decision.pending_until)
+                transition = "entry" if raw_on else "exit"
+                remaining = max(
+                    0,
+                    int((decision.pending_until - now).total_seconds()),
+                )
+                self.reason = (
+                    f"binary headroom {'on' if raw_on else 'off'}; "
+                    f"{transition} debounce {remaining}s remaining"
+                )
+            else:
+                self._cancel_binary_debounce_timer()
+                self.reason = (
+                    "binary headroom on"
+                    if self.surplus_available
+                    else "binary headroom off"
+                )
             return
 
         if config.source_type == SOURCE_GRID:
             watts = self._power_value(config.grid_entity_id)
+            self.raw_source_value = watts
             if watts is None:
                 self._clear_source("grid-flow sensor unavailable")
                 return
+            self.source_valid = True
             export_w = watts if config.grid_export_positive else -watts
             self.headroom_w = export_w - config.export_reserve_w
         else:
             production_w = self._power_value(config.production_entity_id)
             consumption_w = self._power_value(config.consumption_entity_id)
+            self.raw_source_value = production_w
             if production_w is None or consumption_w is None:
                 self._clear_source("production or consumption sensor unavailable")
                 return
+            self.source_valid = True
             self.headroom_w = production_w - consumption_w
             if config.source_type == SOURCE_CURTAILED:
                 # In a curtailed system this is an opportunity signal, not hidden headroom.
@@ -298,6 +366,7 @@ class SolarSpenderController:
         )
 
     def _clear_source(self, reason: str) -> None:
+        self.source_valid = False
         self.surplus_available = False
         self.headroom_w = None
         self.reason = reason
@@ -625,6 +694,33 @@ class SolarSpenderController:
         ):
             self._pending_unsupported_release = None
 
+    def _schedule_binary_debounce(self, deadline: datetime) -> None:
+        """Reconcile when a continuous binary transition becomes eligible."""
+        self._cancel_binary_debounce_timer()
+        seconds = max(
+            0,
+            (deadline - datetime.now().astimezone()).total_seconds(),
+        )
+        self._binary_debounce_scheduled = async_call_later(
+            self.hass,
+            seconds,
+            self._async_binary_debounce_complete,
+        )
+
+    def _cancel_binary_debounce_timer(self) -> None:
+        if self._binary_debounce_scheduled is not None:
+            self._binary_debounce_scheduled()
+            self._binary_debounce_scheduled = None
+
+    def _clear_binary_debounce(self) -> None:
+        self._binary_debounce_until = None
+        self._cancel_binary_debounce_timer()
+
+    @callback
+    def _async_binary_debounce_complete(self, _now: datetime) -> None:
+        self._binary_debounce_scheduled = None
+        self.hass.async_create_task(self.async_reconcile("binary debounce complete"))
+
     def _schedule_reconcile(self, seconds: float) -> None:
         if self._scheduled is not None:
             self._scheduled()
@@ -659,8 +755,13 @@ class SolarSpenderController:
             "state": self.state,
             "reason": self.reason,
             "enabled": self.config.enabled,
+            "raw_source_value": self.raw_source_value,
+            "source_valid": self.source_valid,
             "surplus_available": self.surplus_available,
             "headroom_w": self.headroom_w,
+            "binary_debounce_until": self._binary_debounce_until.isoformat()
+            if self._binary_debounce_until is not None
+            else None,
             "battery_allowed": self.battery_allowed,
             "owned_loads": [
                 {"entity_id": lease.load.entity_id, "activated_at": lease.activated_at.isoformat()}

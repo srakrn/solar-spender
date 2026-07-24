@@ -124,10 +124,15 @@ Defaults are provisional and must be presented for user confirmation.
 
 - `entity_id`: binary-like entity;
 - `on` = raw surplus;
+- continuous-on debounce in minutes before the surplus latch opens;
+- continuous-off debounce in minutes before the surplus latch closes;
 - all other/unavailable states = no surplus.
 
-This mode trusts upstream hysteresis and thresholding. The status view must say
-that Solar Spender cannot estimate how many loads the surplus can support.
+Any bounce resets the relevant deadline. While `off` is pending, Solar Spender
+keeps owned loads running but does not activate another load. Invalid,
+`unknown`, and `unavailable` values clear the latch immediately. This mode still
+trusts upstream thresholding. The status view must say that Solar Spender cannot
+estimate how many loads the surplus can support.
 
 ### Source: grid-flow mode
 
@@ -293,8 +298,11 @@ Clarifications:
 
 - A battery gate blocks new starts. If it closes while loads are owned, the
   source still determines gradual shedding; this avoids abrupt comfort changes.
-- Numeric-source hysteresis is the only source debounce: the surplus latch opens
-  at the entry threshold and closes at the lower exit threshold.
+- Numeric sources use hysteresis rather than a time debounce: the surplus latch
+  opens at the entry threshold and closes at the lower exit threshold.
+- Binary sources use independent continuous-on and continuous-off debounce
+  deadlines. A pending binary transition blocks further load changes; a bounce
+  restarts the applicable deadline.
 - A settling timer never authorizes another load change by itself. After every
   activation or release, each configured source and battery-feedback entity
   must produce a new Home Assistant report after the settling floor. Unchanged

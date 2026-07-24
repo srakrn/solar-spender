@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +27,33 @@ class FeedbackBarrier:
     def is_ready(self, reports: dict[str, datetime]) -> bool:
         """Return whether all required reports crossed this action's barrier."""
         return not self.pending_entities(reports)
+
+
+@dataclass(frozen=True, slots=True)
+class BinaryDebounceDecision:
+    """A latched binary-source decision and any pending transition deadline."""
+
+    surplus_available: bool
+    pending_until: datetime | None
+
+
+def debounce_binary_source(
+    *,
+    surplus_available: bool,
+    raw_on: bool,
+    raw_changed_at: datetime,
+    now: datetime,
+    on_delay_minutes: float,
+    off_delay_minutes: float,
+) -> BinaryDebounceDecision:
+    """Apply continuous entry/exit delays to one valid binary source state."""
+    if raw_on == surplus_available:
+        return BinaryDebounceDecision(raw_on, None)
+    delay_minutes = on_delay_minutes if raw_on else off_delay_minutes
+    pending_until = raw_changed_at + timedelta(minutes=delay_minutes)
+    if now >= pending_until:
+        return BinaryDebounceDecision(raw_on, None)
+    return BinaryDebounceDecision(surplus_available, pending_until)
 
 
 @dataclass(slots=True)

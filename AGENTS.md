@@ -137,6 +137,10 @@ Exactly one source mode is configured.
 - Accept an entity whose state can be interpreted as on/off.
 - `on` means raw surplus exists.
 - `off`, `unknown`, and `unavailable` mean it does not.
+- Require configurable, independent continuous-on and continuous-off debounce
+  durations. A bounce resets the applicable deadline. While an off transition
+  is pending, keep currently owned loads running but do not activate another.
+  Invalid or unavailable data still fails closed immediately.
 
 ### Grid-flow source
 
@@ -252,6 +256,10 @@ These are safety requirements, not implementation suggestions:
   remainder of the current spending cycle. Do not treat headroom returning
   because that load was removed as a new opportunity. Clear the block only
   after fresh feedback observes no surplus while no load is owned.
+- For a binary source, require continuous `on` for its configured entry debounce
+  before activation and continuous `off` for its configured exit debounce
+  before shedding. Neither pending transition may authorize another load
+  change.
 - For numeric sources, enter surplus only at/above the entry threshold and
   remain latched until at/below the exit threshold. Require
   `entry_threshold > exit_threshold`.
@@ -309,6 +317,8 @@ Required configuration:
 
 - enabled flag;
 - source mode and source entities;
+- independent continuous-on and continuous-off debounce durations for binary
+  sources;
 - export reserve and valid entry/exit margins for grid-flow mode;
 - entry and exit thresholds for production/consumption mode;
 - optional curtailed-production probing policy, opportunity threshold,

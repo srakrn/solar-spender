@@ -50,6 +50,65 @@ class FeedbackBarrierTests(unittest.TestCase):
         self.assertTrue(barrier.is_ready(reports))
 
 
+class BinaryDebounceTests(unittest.TestCase):
+    """Verify entry and exit require continuous stable binary states."""
+
+    def test_on_delay_blocks_activation_until_deadline(self) -> None:
+        now = datetime(2026, 7, 24, 12, 4, tzinfo=UTC)
+        decision = FEEDBACK.debounce_binary_source(
+            surplus_available=False,
+            raw_on=True,
+            raw_changed_at=now - timedelta(minutes=4),
+            now=now,
+            on_delay_minutes=5,
+            off_delay_minutes=2,
+        )
+
+        self.assertFalse(decision.surplus_available)
+        self.assertEqual(decision.pending_until, now + timedelta(minutes=1))
+
+        completed = FEEDBACK.debounce_binary_source(
+            surplus_available=False,
+            raw_on=True,
+            raw_changed_at=now - timedelta(minutes=5),
+            now=now,
+            on_delay_minutes=5,
+            off_delay_minutes=2,
+        )
+        self.assertTrue(completed.surplus_available)
+        self.assertIsNone(completed.pending_until)
+
+    def test_off_delay_keeps_surplus_latched_until_deadline(self) -> None:
+        now = datetime(2026, 7, 24, 12, 1, tzinfo=UTC)
+        decision = FEEDBACK.debounce_binary_source(
+            surplus_available=True,
+            raw_on=False,
+            raw_changed_at=now - timedelta(minutes=1),
+            now=now,
+            on_delay_minutes=5,
+            off_delay_minutes=3,
+        )
+
+        self.assertTrue(decision.surplus_available)
+        self.assertEqual(decision.pending_until, now + timedelta(minutes=2))
+
+    def test_bounce_uses_latest_raw_transition_time(self) -> None:
+        now = datetime(2026, 7, 24, 12, 10, tzinfo=UTC)
+        decision = FEEDBACK.debounce_binary_source(
+            surplus_available=False,
+            raw_on=True,
+            raw_changed_at=now - timedelta(seconds=10),
+            now=now,
+            on_delay_minutes=5,
+            off_delay_minutes=3,
+        )
+
+        self.assertEqual(
+            decision.pending_until,
+            now + timedelta(minutes=4, seconds=50),
+        )
+
+
 class CycleMemoryTests(unittest.TestCase):
     """Verify unsupported loads cannot churn within one solar opportunity."""
 
