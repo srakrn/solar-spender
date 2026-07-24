@@ -2865,6 +2865,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
+var PANEL_VERSION = "0.1.1";
 var ENTITY_SELECTORS = {
   binary_entity_id: { entity: { domain: ["binary_sensor", "input_boolean"] } },
   grid_entity_id: { entity: { domain: ["sensor"] } },
@@ -2923,7 +2924,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     const status = this._status || {};
     app.innerHTML = `
       <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-        <div><h1 class="h3 mb-1">Solar Spender</h1><p class="text-body-secondary mb-0">Use spare solar power for climate loads.</p></div>
+        <div><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Use spare solar power for climate loads.</p></div>
         <button class="btn btn-outline-primary" id="refresh" type="button">Refresh</button>
       </div>
       <div class="row g-3 mb-3">

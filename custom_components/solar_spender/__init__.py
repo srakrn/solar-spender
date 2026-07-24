@@ -14,6 +14,7 @@ from .const import (
     DATA_PANEL_REGISTERED,
     DOMAIN,
     PANEL_COMPONENT,
+    PANEL_MODULE_URL,
     PANEL_PATH,
     PANEL_URL,
 )
@@ -79,8 +80,8 @@ def _async_register_panel(hass: HomeAssistant) -> None:
                 "name": PANEL_COMPONENT,
                 "embed_iframe": False,
                 "trust_external": False,
-                "module_url": PANEL_URL,
-                "js_url": PANEL_URL,
+                "module_url": PANEL_MODULE_URL,
+                "js_url": PANEL_MODULE_URL,
             }
         },
         require_admin=True,

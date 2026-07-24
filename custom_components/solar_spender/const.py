@@ -7,7 +7,9 @@ from typing import Final
 DOMAIN: Final = "solar_spender"
 PLATFORMS: Final[list[str]] = []
 
+PANEL_VERSION: Final = "0.1.1"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
+PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
 PANEL_PATH: Final = "solar-spender"
 
