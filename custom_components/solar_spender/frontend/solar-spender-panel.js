@@ -21,18 +21,44 @@ function reflectSelectorValue(selector, value) {
 }
 function sourceConfigurationVisibility(sourceType) {
   return {
-    binary: sourceType === "binary",
     grid: sourceType === "grid_flow",
     production: sourceType === "production_consumption" || sourceType === "curtailed_production",
     curtailed: sourceType === "curtailed_production"
   };
 }
-function batteryConfigurationVisibility(policy) {
+function sourceModeDescription(sourceType) {
   return {
-    status: policy !== "disabled",
+    grid_flow: "Best when your grid meter reports live export. Solar Spender uses only export above your reserve and margins.",
+    production_consumption: "Use when solar production minus whole-home consumption truly represents spare power. This is not suitable when the inverter hides unused capacity.",
+    curtailed_production: "For zero-export systems where unused solar capacity is hidden. Solar Spender cautiously tries one AC, waits for fresh readings, and keeps it only when solar supports it."
+  }[sourceType] || "Choose how Solar Spender detects spare solar power.";
+}
+function batteryPolicyDescription(policy) {
+  return {
+    disabled: "Battery state does not block new AC starts.",
+    require_charging: "Start another AC only while the battery is measurably charging.",
+    charging_or_soc: "Start another AC while charging, or after battery state of charge reaches the configured threshold.",
+    full_idle_for_probe: "Before testing hidden solar capacity, require a full battery with power flow inside the idle threshold."
+  }[policy] || "Choose how battery state affects new AC starts.";
+}
+function batteryConfigurationVisibility(policy, directionSource = "power") {
+  const enabled = policy !== "disabled";
+  return {
+    direction: enabled,
+    status: enabled && directionSource === "status",
+    power: enabled && directionSource === "power",
     soc: policy === "charging_or_soc" || policy === "full_idle_for_probe",
     threshold: policy === "charging_or_soc" || policy === "full_idle_for_probe"
   };
+}
+function loadOwnershipPresentation(load) {
+  if (load.owned) return { style: "success", label: "Owned" };
+  if (!load.enabled) return { style: "secondary", label: "Disabled" };
+  if (load.can_be_owned) return { style: "primary", label: "Can be owned" };
+  if (load.blocked_for_cycle) {
+    return { style: "warning", label: "Blocked this cycle" };
+  }
+  return { style: "secondary", label: "Not owned" };
 }
 function statusPresentations(status, options) {
   const enabled = Boolean(status?.enabled);
@@ -40,7 +66,7 @@ function statusPresentations(status, options) {
     blocked_battery: "Blocked by battery",
     disabled: "Disabled",
     monitoring: "Monitoring",
-    probing: "Probing",
+    probing: "Testing one AC",
     shedding: "Releasing loads",
     spending: "Spending solar",
     waiting_feedback: "Waiting for feedback"
@@ -54,12 +80,12 @@ function statusPresentations(status, options) {
       value: "Disabled",
       detail: "Automation is paused. Solar Spender will not start or release ACs."
     },
-    surplus: enabled ? {
+    surplus: status?.source_valid ? {
       value: status?.surplus_available ? "Available" : "Unavailable",
       detail: null
     } : {
-      value: "Inactive",
-      detail: "Enable Solar Spender to evaluate this source for load control."
+      value: "Unknown",
+      detail: "The configured source is unavailable or incomplete."
     },
     battery: !batteryConfigured ? {
       value: "Not configured",
@@ -69,7 +95,7 @@ function statusPresentations(status, options) {
       detail: "The configured battery condition is evaluated only while Solar Spender is enabled."
     } : {
       value: status?.battery_allowed ? "Open" : "Blocking",
-      detail: status?.battery_allowed ? "The configured battery condition permits a new activation." : "New activations are paused by the battery condition."
+      detail: `${status?.battery_allowed ? "The configured battery condition permits a new activation." : "New activations are paused by the battery condition."}` + (status?.battery_direction ? ` Direction: ${status.battery_direction}.` : "") + (typeof status?.battery_power_w === "number" ? ` Normalized battery power: ${Math.round(status.battery_power_w)} W (positive is charging).` : "")
     },
     feedback: !enabled ? {
       value: "Idle",
@@ -119,10 +145,7 @@ function relevantBatteryStatusEntityIds(states, configuredValues = []) {
 // src/solar-spender-panel.js
 var DEFAULT_OPTIONS = {
   enabled: false,
-  source_type: "binary",
-  binary_entity_id: "",
-  binary_on_delay_minutes: 0,
-  binary_off_delay_minutes: 0,
+  source_type: "production_consumption",
   grid_entity_id: "",
   grid_export_positive: true,
   production_entity_id: "",
@@ -138,19 +161,22 @@ var DEFAULT_OPTIONS = {
   battery_policy: "disabled",
   battery_soc_entity_id: "",
   battery_status_entity_id: "",
+  battery_power_entity_id: "",
+  battery_direction_source: "power",
+  battery_power_charging_positive: true,
+  battery_power_threshold_w: 50,
   battery_full_threshold: 98,
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.3.1";
+var PANEL_VERSION = "0.4.0";
 var KEEP_CURRENT = "__keep_current__";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
   source_type: [
-    ["binary", "Binary headroom"],
-    ["grid_flow", "Grid flow / export"],
-    ["production_consumption", "Production minus consumption"],
-    ["curtailed_production", "Curtailed-production probe"]
+    ["grid_flow", "Grid export"],
+    ["production_consumption", "Solar production minus home use"],
+    ["curtailed_production", "Zero-export solar \xB7 test one AC at a time"]
   ],
   grid_export_positive: [
     ["true", "Export is positive"],
@@ -160,15 +186,18 @@ var SELECT_OPTIONS = {
     ["disabled", "Disabled"],
     ["require_charging", "Require charging"],
     ["charging_or_soc", "Charging or SOC threshold"],
-    ["full_idle_for_probe", "Full and idle for probes"]
+    ["full_idle_for_probe", "Full battery before zero-export testing"]
+  ],
+  battery_direction_source: [
+    ["power", "Battery power sensor"],
+    ["status", "Charging status entity"]
+  ],
+  battery_power_charging_positive: [
+    ["true", "Positive means charging"],
+    ["false", "Negative means charging"]
   ]
 };
 var ENTITY_SELECTORS = {
-  binary_entity_id: {
-    entity: {
-      filter: [{ domain: ["binary_sensor", "input_boolean"] }]
-    }
-  },
   load_entity_id: {
     entity: {
       filter: [{ domain: "climate" }]
@@ -297,7 +326,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       </div>
       <div class="row g-3 mb-3">
         ${this._card("Solar Spender", cards.controller.value, cards.controller.detail)}
-        ${this._card("Surplus control", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
+        ${this._card("Solar headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
         ${this._card("Battery condition", cards.battery.value, cards.battery.detail)}
         ${this._card("Source feedback", cards.feedback.value, cards.feedback.detail)}
         ${this._card("Learned capacity", this._learnedRange(status), "Temporary estimate for the current solar opportunity.")}
@@ -355,9 +384,9 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         if (value === void 0 || value === String(this._options[key])) return;
         reflectSelectorValue(selector, value);
         const options = this._collectOptions();
-        options[key] = key === "enabled" || key === "grid_export_positive" ? value === "true" : value;
+        options[key] = key === "enabled" || key === "grid_export_positive" || key === "battery_power_charging_positive" ? value === "true" : value;
         this._options = options;
-        if (key === "source_type" || key === "battery_policy") {
+        if (key === "source_type" || key === "battery_policy" || key === "battery_direction_source") {
           this._render();
         }
       });
@@ -449,6 +478,28 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         );
       });
     });
+    this._shadow.querySelectorAll("ha-selector[data-load-enabled-index]").forEach((selector) => {
+      const index = Number(selector.dataset.loadEnabledIndex);
+      const load = this._options.loads[index] || {};
+      selector.hass = this._hass;
+      selector.selector = {
+        select: {
+          mode: "dropdown",
+          options: [
+            { value: "true", label: "Enabled" },
+            { value: "false", label: "Disabled" }
+          ]
+        }
+      };
+      selector.value = String(load.enabled !== false);
+      selector.addEventListener("value-changed", (event) => {
+        const value = event.detail?.value;
+        if (value === void 0) return;
+        reflectSelectorValue(selector, value);
+        this._updateLoadOption(index, "enabled", value === "true");
+        this._render();
+      });
+    });
   }
   _numberSelector(dataset) {
     const number = {
@@ -472,7 +523,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     });
   }
   _entitySelector(key) {
-    if (key === "grid_entity_id" || key === "production_entity_id" || key === "consumption_entity_id") {
+    if (key === "grid_entity_id" || key === "production_entity_id" || key === "consumption_entity_id" || key === "battery_power_entity_id") {
       return {
         entity: {
           include_entities: relevantPowerEntityIds(this._hass?.states)
@@ -552,12 +603,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   _sourceConfiguration() {
     const visibility = sourceConfigurationVisibility(this._options.source_type);
     let fields;
-    if (visibility.binary) {
-      fields = `
-        <div class="col-12">${this._entityField("binary_entity_id", "Headroom entity", "On means spare solar is available. Unknown and unavailable fail closed immediately.")}</div>
-        <div class="col-md-6">${this._numberField("binary_on_delay_minutes", "On debounce", "The headroom entity must remain continuously on for this many minutes before Solar Spender may activate a load.", 0, null, "minutes")}</div>
-        <div class="col-md-6">${this._numberField("binary_off_delay_minutes", "Off debounce", "The headroom entity must remain continuously off for this many minutes before Solar Spender begins releasing owned loads.", 0, null, "minutes")}</div>`;
-    } else if (visibility.grid) {
+    if (visibility.grid) {
       fields = `
         <div class="col-md-6">${this._entityField("grid_entity_id", "Grid-flow entity", "A measurement power sensor that reports import and export in W or kW.")}</div>
         <div class="col-md-6">${this._selectField("grid_export_positive", "Grid sensor sign", "Tell Solar Spender which sign means export so it can normalize the measurement.")}</div>
@@ -565,39 +611,56 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         <div class="col-md-4">${this._numberField("entry_threshold_w", "Entry margin", "Spend only when export above the reserve reaches this margin.", 0, null, "W")}</div>
         <div class="col-md-4">${this._numberField("exit_threshold_w", "Exit margin", "Stop spending at this lower margin to prevent oscillation.", 0, null, "W")}</div>`;
     } else {
+      const entryLabel = visibility.curtailed ? "Minimum solar production" : "Entry threshold";
+      const entryHelp = visibility.curtailed ? "Begin considering a one-AC test only when solar production reaches this level." : "Surplus becomes available at or above this value.";
+      const exitLabel = visibility.curtailed ? "Stop-testing threshold" : "Exit threshold";
+      const exitHelp = visibility.curtailed ? "Stop considering hidden-capacity tests when production falls to this lower level." : "Surplus remains latched until it falls to this lower value.";
       fields = `
         <div class="col-md-6">${this._entityField("production_entity_id", "Production power entity", "Current solar production from a measurement power sensor using W or kW.")}</div>
         <div class="col-md-6">${this._entityField("consumption_entity_id", "Consumption power entity", "Whole-home consumption measured at the same electrical boundary as production.")}</div>
-        <div class="col-md-6">${this._numberField("entry_threshold_w", "Entry threshold", "Surplus becomes available at or above this value.", 0, null, "W")}</div>
-        <div class="col-md-6">${this._numberField("exit_threshold_w", "Exit threshold", "Surplus remains latched until it falls to this lower value.", 0, null, "W")}</div>
-        ${visibility.curtailed ? `<div class="col-12"><div class="alert alert-warning mb-0">Curtailed probing also requires the battery policy <strong>Full and idle for probes</strong>.</div></div>` : ""}`;
+        <div class="col-md-6">${this._numberField("entry_threshold_w", entryLabel, entryHelp, 0, null, "W")}</div>
+        <div class="col-md-6">${this._numberField("exit_threshold_w", exitLabel, exitHelp, 0, null, "W")}</div>
+        ${visibility.curtailed ? `<div class="col-12"><div class="alert alert-warning mb-0">Zero-export testing requires <strong>Full battery before zero-export testing</strong>. Solar Spender changes only one AC before checking fresh readings.</div></div>` : ""}`;
     }
     return `
       <div class="config-section">
         <h3 class="h6 mb-3 section-heading">Solar source \xB7 ${this._escape(
       SELECT_OPTIONS.source_type.find(([value]) => value === this._options.source_type)?.[1] || this._options.source_type
     )}</h3>
+        <div class="alert alert-info">${this._escape(sourceModeDescription(this._options.source_type))}</div>
         <div class="row g-3">${fields}</div>
       </div>`;
   }
   _batteryConfiguration() {
     const policy = this._options.battery_policy;
-    const visibility = batteryConfigurationVisibility(policy);
+    const visibility = batteryConfigurationVisibility(
+      policy,
+      this._options.battery_direction_source
+    );
     let fields = "";
-    if (visibility.status && !visibility.soc) {
-      fields = `
-        <div class="col-md-6">${this._entityField("battery_status_entity_id", "Battery status entity", "Must report a configured charging state or use the battery-charging binary sensor class.")}</div>`;
-    } else if (visibility.soc) {
-      fields = `
-        <div class="col-md-4">${this._entityField("battery_soc_entity_id", "Battery SOC entity", "Battery state of charge from a measurement battery sensor using %.")}</div>
-        <div class="col-md-4">${this._entityField("battery_status_entity_id", "Battery status entity", "Reports charging, idle, or discharging.")}</div>
-        <div class="col-md-4">${this._numberField("battery_full_threshold", "Full/SOC threshold", "Battery percentage required by the selected policy.", 0, 100, "%")}</div>`;
+    if (visibility.direction) {
+      fields += `<div class="col-md-6">${this._selectField("battery_direction_source", "How to detect charging", "Use a status entity when available, or infer direction from a live battery power sensor.")}</div>`;
+    }
+    if (visibility.status) {
+      fields += `<div class="col-md-6">${this._entityField("battery_status_entity_id", "Battery status entity", "Must report charging, idle, or discharging, or use the battery-charging binary sensor class.")}</div>`;
+    }
+    if (visibility.power) {
+      fields += `
+        <div class="col-md-4">${this._entityField("battery_power_entity_id", "Battery power entity", "Live battery charge/discharge power from a measurement sensor using W or kW.")}</div>
+        <div class="col-md-4">${this._selectField("battery_power_charging_positive", "Battery power sign", "Select which sensor sign means power is flowing into the battery.")}</div>
+        <div class="col-md-4">${this._numberField("battery_power_threshold_w", "Idle threshold", "Power at or below this magnitude is treated as idle, absorbing sensor noise and standby use.", 0, null, "W")}</div>`;
+    }
+    if (visibility.soc) {
+      fields += `
+        <div class="col-md-6">${this._entityField("battery_soc_entity_id", "Battery SOC entity", "Battery state of charge from a measurement battery sensor using %.")}</div>
+        <div class="col-md-6">${this._numberField("battery_full_threshold", "Full/SOC threshold", "Battery percentage required by the selected policy.", 0, 100, "%")}</div>`;
     }
     return `
       <div class="config-section">
         <h3 class="h6 mb-3 section-heading">Battery condition</h3>
         <div class="row g-3">
           <div class="col-md-6">${this._selectField("battery_policy", "Battery policy", "Choose whether battery state may block new AC activation.")}</div>
+          <div class="col-12"><div class="alert alert-info mb-0">${this._escape(batteryPolicyDescription(policy))}</div></div>
           ${fields}
         </div>
       </div>`;
@@ -620,6 +683,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         <div class="d-flex justify-content-between align-items-center mb-3"><div><strong>${this._escape(this._hass?.states?.[load.entity_id]?.attributes?.friendly_name || `AC ${index + 1}`)}</strong><div class="small text-body-secondary">${this._escape(load.entity_id || "Select a climate entity")}</div></div><button class="btn btn-sm btn-outline-danger" type="button" data-remove-load="${index}">Remove</button></div>
         <div class="row g-3">
           <div class="col-md-6">${this._label("Climate entity")}<ha-selector data-load-index="${index}"></ha-selector>${this._help("The air conditioner Solar Spender may start and later release.")}</div>
+          <div class="col-md-6">${this._label("Solar Spender control")}<ha-selector data-load-enabled-index="${index}"></ha-selector>${this._help("Disabled ACs stay configured but will not be started. Disabling never turns off an AC.")}</div>
           <div class="col-md-6">${this._loadSelect(index, "hvac_mode", "Desired mode", "Only modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan mode", "Optional fan setting. Only fan modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadNumber(index, "temperature", "Target temperature", `Optional target in the selected AC's ${capabilities.minTemp}\u2013${capabilities.maxTemp} \xB0C range.`, capabilities.minTemp, capabilities.maxTemp, "\xB0C", capabilities.tempStep)}</div>
@@ -641,8 +705,8 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   }
   _loads(loads) {
     return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => {
-      const badge = load.blocked_for_cycle && load.owned ? ["warning", "Owned \xB7 release pending"] : load.blocked_for_cycle ? ["warning", "Blocked this cycle"] : load.owned ? ["success", "Owned"] : ["secondary", load.state || "unknown"];
-      return `<li class="list-group-item px-0 d-flex justify-content-between gap-2"><span class="text-break">${this._escape(load.entity_id)}</span><span class="badge text-bg-${badge[0]}">${this._escape(badge[1])}</span></li>`;
+      const ownership = loadOwnershipPresentation(load);
+      return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape(load.ownership_reason || "Ownership status unavailable")}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
     }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`;
   }
   _history(history) {
@@ -660,9 +724,8 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     return "Learning";
   }
   _surplusDetail(status) {
-    if (typeof status.raw_source_value === "string" && status.headroom_w === null) {
-      const pending = status.binary_debounce_until ? ` \xB7 debounce until ${status.binary_debounce_until}` : "";
-      return `Raw: ${status.raw_source_value}${pending}`;
+    if (this._options.source_type === "curtailed_production") {
+      return typeof status.opportunity_power_w === "number" ? `${Math.round(status.opportunity_power_w)} W solar production; hidden headroom cannot be measured directly.` : "Hidden headroom cannot be measured directly.";
     }
     return this._watts(status.headroom_w);
   }

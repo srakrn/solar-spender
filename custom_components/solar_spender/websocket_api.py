@@ -12,18 +12,19 @@ from homeassistant.core import HomeAssistant, State, callback
 
 from .const import (
     BATTERY_CHARGING_OR_SOC,
+    BATTERY_DIRECTION_POWER,
+    BATTERY_DIRECTION_STATUS,
     BATTERY_DISABLED,
     BATTERY_FULL_IDLE_FOR_PROBE,
     DATA_CONTROLLER,
     DEFAULT_OPTIONS,
     DOMAIN,
-    SOURCE_BINARY,
     SOURCE_CURTAILED,
     SOURCE_GRID,
     SOURCE_PRODUCTION,
 )
 from .controller import SolarSpenderController
-from .migration import without_legacy_utility
+from .migration import current_options
 from .models import ConfigurationError, SolarSpenderConfig
 
 
@@ -73,7 +74,7 @@ async def websocket_get_config(
         return
     connection.send_result(
         msg["id"],
-        without_legacy_utility({**DEFAULT_OPTIONS, **entry.options}),
+        current_options({**DEFAULT_OPTIONS, **entry.options}),
     )
 
 
@@ -94,7 +95,7 @@ async def websocket_update_config(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
         return
-    options = without_legacy_utility({**DEFAULT_OPTIONS, **msg["options"]})
+    options = current_options({**DEFAULT_OPTIONS, **msg["options"]})
     try:
         config = SolarSpenderConfig.from_options(options)
         _validate_configured_entities(hass, config)
@@ -120,13 +121,7 @@ def _validate_configured_entities(
     hass: HomeAssistant, config: SolarSpenderConfig
 ) -> None:
     """Validate entity metadata independently of the frontend selectors."""
-    if config.source_type == SOURCE_BINARY and config.binary_entity_id:
-        state = _require_entity(hass, config.binary_entity_id)
-        if state.entity_id.split(".", 1)[0] not in {"binary_sensor", "input_boolean"}:
-            raise ConfigurationError(
-                "binary headroom must be a binary_sensor or input_boolean"
-            )
-    elif config.source_type == SOURCE_GRID and config.grid_entity_id:
+    if config.source_type == SOURCE_GRID and config.grid_entity_id:
         _validate_power_entity(hass, config.grid_entity_id)
     elif config.source_type in {SOURCE_PRODUCTION, SOURCE_CURTAILED}:
         if config.production_entity_id:
@@ -136,8 +131,16 @@ def _validate_configured_entities(
 
     if config.battery_policy == BATTERY_DISABLED:
         return
-    if config.battery_status_entity_id:
+    if (
+        config.battery_direction_source == BATTERY_DIRECTION_STATUS
+        and config.battery_status_entity_id
+    ):
         _validate_battery_status_entity(hass, config)
+    if (
+        config.battery_direction_source == BATTERY_DIRECTION_POWER
+        and config.battery_power_entity_id
+    ):
+        _validate_power_entity(hass, config.battery_power_entity_id)
     if (
         config.battery_policy
         in {BATTERY_CHARGING_OR_SOC, BATTERY_FULL_IDLE_FOR_PROBE}
@@ -214,6 +217,10 @@ def _validate_climate_capabilities(
 ) -> None:
     """Reject climate profiles which the selected entity cannot safely apply."""
     for load in config.loads:
+        if not load.enabled:
+            # Keep intentionally disabled definitions editable even if the
+            # entity is temporarily unavailable, renamed, or removed.
+            continue
         state = hass.states.get(load.entity_id)
         if state is None:
             raise ConfigurationError(f"{load.entity_id} does not exist")

@@ -21,8 +21,8 @@ sys.modules[SPEC.name] = MIGRATION
 SPEC.loader.exec_module(MIGRATION)
 
 
-class UtilityMigrationTests(unittest.TestCase):
-    """The removed preference field must not survive a save or upgrade."""
+class ConfigurationMigrationTests(unittest.TestCase):
+    """Retired configuration must migrate conservatively."""
 
     def test_removes_utility_without_changing_load_order_or_other_fields(self) -> None:
         options = {
@@ -44,3 +44,33 @@ class UtilityMigrationTests(unittest.TestCase):
         )
         self.assertTrue(migrated["enabled"])
         self.assertIn("utility", options["loads"][0])
+
+    def test_removed_binary_source_is_disabled_and_requires_reconfiguration(
+        self,
+    ) -> None:
+        options = {
+            "enabled": True,
+            "source_type": "binary",
+            "binary_entity_id": "binary_sensor.old_headroom",
+            "binary_on_delay_minutes": 5,
+            "binary_off_delay_minutes": 2,
+            "loads": [],
+        }
+
+        migrated = MIGRATION.current_options(options)
+
+        self.assertFalse(migrated["enabled"])
+        self.assertEqual(migrated["source_type"], "production_consumption")
+        self.assertNotIn("binary_entity_id", migrated)
+        self.assertNotIn("binary_on_delay_minutes", migrated)
+        self.assertNotIn("binary_off_delay_minutes", migrated)
+
+    def test_existing_status_battery_keeps_status_direction(self) -> None:
+        migrated = MIGRATION.current_options(
+            {
+                "battery_status_entity_id": "sensor.battery_mode",
+                "loads": [],
+            }
+        )
+
+        self.assertEqual(migrated["battery_direction_source"], "status")

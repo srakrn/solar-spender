@@ -104,9 +104,8 @@ Use these terms consistently:
 
 - **raw source value**: the latest validated value from the configured source.
 - **surplus available**: the controller's hysteresis-latched source decision.
-  Binary mode uses the source's on/off decision directly.
-- **source**: binary headroom, signed grid flow, production/consumption power,
-  or curtailed-production feedback.
+- **source**: signed grid flow, production/consumption power, or
+  curtailed-production feedback.
 - **power headroom**: production power minus consumption power, in watts.
 - **export reserve**: grid export intentionally left unused by Solar Spender.
 - **curtailed production**: production limited to current demand, so unused PV
@@ -131,16 +130,6 @@ Live decisions use power measurements (`W` or `kW`) normalized to watts.
 ## Input contract
 
 Exactly one source mode is configured.
-
-### Binary source
-
-- Accept an entity whose state can be interpreted as on/off.
-- `on` means raw surplus exists.
-- `off`, `unknown`, and `unavailable` mean it does not.
-- Require configurable, independent continuous-on and continuous-off debounce
-  durations. A bounce resets the applicable deadline. While an off transition
-  is pending, keep currently owned loads running but do not activate another.
-  Invalid or unavailable data still fails closed immediately.
 
 ### Grid-flow source
 
@@ -170,9 +159,8 @@ Some zero-export systems curtail production to match demand. In that case,
 remains. Never label that value “available headroom.” Support it only through an
 explicit curtailed-production strategy:
 
-- require a configured opportunity condition, such as the binary headroom
-  source, a conservative external estimate, or minimum production plus a
-  probe-ready battery;
+- require minimum production plus a probe-ready battery as the opportunity
+  condition;
 - activate at most one candidate load as a probe;
 - wait for both an AC startup allowance and a measurement settling window;
 - retain the load only when production rose to cover its observed marginal
@@ -190,8 +178,7 @@ probe.
 A probe is not free: the grid or battery may need to cover it until measurement
 settles and minimum-on time permits release. Do not probe unless the configured
 fallback power/energy budget permits that worst case. If the user permits no
-fallback at all, require direct headroom or a sufficiently conservative external
-estimate instead.
+fallback at all, do not probe hidden capacity.
 
 Support for accumulated-energy sensors requires aligned interval statistics,
 reset handling, and stale-sample handling. It is a later feature, not a shortcut
@@ -207,6 +194,11 @@ Battery gating is optional. Supported policy should distinguish:
 - `full_idle_for_probe`: for curtailed-production probes, require SOC at/above a
   configurable full threshold and require the battery to be neither charging
   nor discharging.
+
+Battery direction may come from a charging/status entity or a measurement power
+sensor. For power sensors, require an explicit charging sign convention and a
+non-negative symmetric idle threshold; normalize internally so charging is
+positive, discharging is negative, and values within the threshold are idle.
 
 Use `charging_or_soc` when surplus is directly observable and spending alongside
 battery charging is intended. Use `full_idle_for_probe` as the default battery
@@ -256,10 +248,6 @@ These are safety requirements, not implementation suggestions:
   remainder of the current spending cycle. Do not treat headroom returning
   because that load was removed as a new opportunity. Clear the block only
   after fresh feedback observes no surplus while no load is owned.
-- For a binary source, require continuous `on` for its configured entry debounce
-  before activation and continuous `off` for its configured exit debounce
-  before shedding. Neither pending transition may authorize another load
-  change.
 - For numeric sources, enter surplus only at/above the entry threshold and
   remain latched until at/below the exit threshold. Require
   `entry_threshold > exit_threshold`.
@@ -317,15 +305,14 @@ Required configuration:
 
 - enabled flag;
 - source mode and source entities;
-- independent continuous-on and continuous-off debounce durations for binary
-  sources;
 - export reserve and valid entry/exit margins for grid-flow mode;
 - entry and exit thresholds for production/consumption mode;
 - optional curtailed-production probing policy, opportunity threshold,
   grid-import/battery-discharge limits, and settling duration;
 - action-confirmation timeout and measurement-settling duration;
-- optional battery policy, SOC/status/power entities, SOC threshold, and
-  normalized charging/discharging state mappings;
+- optional battery policy, SOC/status/power entities, direction source, power
+  sign and idle threshold, SOC threshold, and normalized charging/discharging
+  state mappings;
 - ordered AC definitions with entity ID, priority, optional HVAC mode, optional
   target temperature, optional fan mode, optional expected marginal power, and
   minimum on/off durations. `dry` with no temperature is a
@@ -347,11 +334,14 @@ theme variables. It needs:
 
 - current state, raw source value, hysteresis-latched surplus, calculated watts,
   battery gate, and relevant per-load deadlines;
+- a read-only Home Assistant binary sensor for valid, latched solar headroom
+  which continues evaluating while automation is disabled;
 - enabled/pause control with clear semantics;
 - source and battery configuration;
 - feedback/probing strategy and measurement confidence;
 - ordered AC list and profile editor;
-- per-load ownership, current status, last command, and error;
+- per-load enabled state, ownership eligibility/reason, current status, last
+  command, and error;
 - a concise event history for explaining decisions;
 - validation errors before save;
 - confirmation before releasing owned loads.

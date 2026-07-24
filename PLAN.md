@@ -14,8 +14,8 @@ automation engine.
 The first release will support:
 
 - one installation/config entry;
-- binary headroom, grid-flow, production/consumption, and curtailed-production
-  source strategies;
+- grid-flow, production/consumption, and cautious zero-export source
+  strategies;
 - a configurable export reserve for systems that permit export;
 - an optional battery gate;
 - multiple prioritized ACs with mode and/or target-temperature profiles;
@@ -55,8 +55,8 @@ some export available.
 
 When production is curtailed to demand, measured production follows consumption
 and unused PV capacity is hidden. A single measurement cannot reveal that
-ceiling. Solar Spender therefore uses an inverter headroom signal, a conservative
-external estimate, or a controlled one-load probe.
+ceiling. Solar Spender therefore uses a controlled one-load trial while the
+battery indicates that testing is safe.
 
 For a probe, Solar Spender starts one AC, allows for compressor startup and
 sensor settling, then checks whether production rose with consumption without
@@ -66,8 +66,8 @@ constraints.
 
 A probe may temporarily use grid or battery power. It is allowed only when the
 configured fallback power and energy budget can cover the settling period and
-minimum-on time. A strict zero-import, zero-discharge configuration requires a
-direct headroom signal or conservative external estimate instead.
+minimum-on time. A strict zero-import, zero-discharge configuration cannot
+safely test hidden capacity.
 
 A battery can also provide the opportunity heuristic. By default, probing is
 eligible only when SOC is at/above a configurable “full” threshold and the
@@ -137,24 +137,18 @@ dehumidification.
 
 Defaults are provisional and must be presented for user confirmation.
 
+Schema v3 removes binary headroom as an input source. Upgrades from that source
+are disabled and moved to an incomplete production/consumption configuration so
+the user must deliberately select and validate a numeric strategy before
+automation can resume. Existing battery status configurations migrate to the
+status-direction path; other installations default to battery power direction.
+
 The runtime timing controls are also exposed under one Solar Spender device as
 Home Assistant entities: an Automation switch and number entities for first
 check delay, confirmation checks, check spacing, and the delay before the next
-AC. Source wiring and per-AC profiles remain panel configuration.
-
-### Source: binary mode
-
-- `entity_id`: binary-like entity;
-- `on` = raw surplus;
-- continuous-on debounce in minutes before the surplus latch opens;
-- continuous-off debounce in minutes before the surplus latch closes;
-- all other/unavailable states = no surplus.
-
-Any bounce resets the relevant deadline. While `off` is pending, Solar Spender
-keeps owned loads running but does not activate another load. Invalid,
-`unknown`, and `unavailable` values clear the latch immediately. This mode still
-trusts upstream thresholding. The status view must say that Solar Spender cannot
-estimate how many loads the surplus can support.
+AC. A read-only Solar headroom binary sensor exposes the valid, latched source
+decision even while automation is disabled. Source wiring and per-AC profiles
+remain panel configuration.
 
 ### Source: grid-flow mode
 
@@ -191,8 +185,8 @@ In **curtailed-production** strategy, do not present
 `production - consumption` as available headroom. Configuration additionally
 contains:
 
-- an opportunity condition: a binary headroom signal, or minimum PV production
-  while the battery is full and idle;
+- an opportunity condition based on minimum PV production while the battery is
+  full and idle;
 - optional signed grid-flow power, strongly recommended;
 - optional battery charge/discharge power;
 - maximum tolerated grid import and battery discharge during a probe;
@@ -214,6 +208,11 @@ solar production from imported or battery power, it must report
 - `charging_or_soc`, adding an SOC sensor and threshold;
 - `full_idle_for_probe`, requiring an SOC sensor, full threshold, and normalized
   charging/discharging status or power-flow entity.
+
+Battery direction can come from a charging/status entity or a measurement power
+sensor. Power mode requires an explicit sign convention and symmetric idle
+threshold. Internally, positive means charging, negative means discharging, and
+values within the threshold mean idle.
 
 The panel should preview the parsed charging state and gate result before the
 user enables automation. In `full_idle_for_probe`, the preview must separately
@@ -318,9 +317,6 @@ Clarifications:
   source still determines gradual shedding; this avoids abrupt comfort changes.
 - Numeric sources use hysteresis rather than a time debounce: the surplus latch
   opens at the entry threshold and closes at the lower exit threshold.
-- Binary sources use independent continuous-on and continuous-off debounce
-  deadlines. A pending binary transition blocks further load changes; a bounce
-  restarts the applicable deadline.
 - A timer never authorizes another load change by itself. After every activation
   or release, each configured source and battery-feedback entity must produce a
   new Home Assistant report after each sampling boundary. The strict majority
@@ -328,8 +324,8 @@ Clarifications:
   through Home Assistant's filtered `state_reported` event.
 - If fresh post-activation feedback loses surplus, release the just-added load
   and block that load for the rest of the current opportunity. Removing it and
-  seeing the same binary headroom signal return does not re-arm it. Clear the
-  block only after fresh feedback observes no surplus while no load is owned.
+  seeing headroom return does not re-arm it. Clear the block only after fresh
+  feedback observes no surplus while no load is owned.
 - On loss, release the lowest-priority owned load as soon as its minimum-on time
   allows. Confirm the change and wait for fresh post-settling feedback before
   another.
@@ -400,6 +396,8 @@ Status includes:
 - loads blocked as unsupported for the current spending cycle;
 - active deadlines/countdowns;
 - configured load eligibility and ownership;
+- an explicit per-load reason when an AC is disabled, already running,
+  manually changed, unavailable, minimum-off constrained, or available to own;
 - last command/result per load;
 - recent bounded decision events;
 - configuration revision.
@@ -413,7 +411,8 @@ The sidebar item is named **Solar Spender** with an appropriate solar/power icon
 The panel has three responsive sections:
 
 1. **Now** — controller state, headroom, battery, next action, countdown, enabled
-   toggle, and owned-load summary.
+   toggle, and owned-load summary. Headroom remains visible while automation is
+   disabled.
 2. **Loads** — ordered AC cards, desired profiles, eligibility, ownership, and
    per-load errors.
 3. **Settings** — source thresholds, battery policy, per-load minimum-on/off
@@ -444,8 +443,8 @@ and reloaded; a placeholder panel appears with no external network dependency.
 
 - Implement config flow and single-entry lifecycle.
 - Implement versioned models and backend validation.
-- Implement binary, grid-flow, and production/consumption evaluators, watt
-  conversion, export reserve, thresholds, and hysteresis.
+- Implement grid-flow and production/consumption evaluators, watt conversion,
+  export reserve, thresholds, and hysteresis.
 - Implement explicit observable-surplus and curtailed-production strategies.
 - Implement battery policies.
 - Subscribe to entity changes and expose live read-only status.

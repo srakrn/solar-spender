@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from math import isfinite
 from statistics import median
 from typing import Any
 
@@ -17,14 +18,17 @@ from homeassistant.const import (
 )
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
+from .battery import direction_from_power
 from .const import (
     BATTERY_CHARGING_OR_SOC,
+    BATTERY_DIRECTION_POWER,
     BATTERY_DISABLED,
     BATTERY_FULL_IDLE_FOR_PROBE,
     BATTERY_REQUIRE_CHARGING,
-    SOURCE_BINARY,
+    CONTROLLER_STATUS_UPDATED,
     SOURCE_CURTAILED,
     SOURCE_GRID,
     STATE_BLOCKED_BATTERY,
@@ -40,7 +44,6 @@ from .feedback import (
     FeedbackAssessment,
     LearnedDrawEstimate,
     append_bounded_event,
-    debounce_binary_source,
 )
 from .models import LoadConfig, SolarSpenderConfig
 from .selection import first_to_activate, first_to_release
@@ -71,10 +74,13 @@ class SolarSpenderController:
         self.state = STATE_DISABLED if not config.enabled else STATE_MONITORING
         self.surplus_available = False
         self.battery_allowed = config.battery_policy == BATTERY_DISABLED
+        self.battery_direction = "not_configured"
+        self.battery_power_w: float | None = None
         self.reason = "disabled" if not config.enabled else "awaiting source"
         self.raw_source_value: str | float | None = None
         self.source_valid = False
         self.headroom_w: float | None = None
+        self.opportunity_power_w: float | None = None
         self._leases: dict[str, Lease] = {}
         self._last_off: dict[str, datetime] = {}
         self._pending_activation: tuple[LoadConfig, dict[str, Any], dict[str, Any]] | None = None
@@ -83,8 +89,6 @@ class SolarSpenderController:
         self._feedback_assessment: FeedbackAssessment | None = None
         self._cycle_memory = CycleMemory()
         self._pending_unsupported_release: str | None = None
-        self._binary_debounce_until: datetime | None = None
-        self._binary_debounce_scheduled: Callable[[], None] | None = None
         self._next_load_not_before: datetime | None = None
         self._unsubscribers: list[Callable[[], None]] = []
         self._scheduled: Callable[[], None] | None = None
@@ -122,9 +126,6 @@ class SolarSpenderController:
         if self._scheduled is not None:
             self._scheduled()
             self._scheduled = None
-        if self._binary_debounce_scheduled is not None:
-            self._binary_debounce_scheduled()
-            self._binary_debounce_scheduled = None
 
     async def async_apply_runtime_config(self, config: SolarSpenderConfig) -> None:
         """Apply options exposed as entities without dropping active leases."""
@@ -177,12 +178,12 @@ class SolarSpenderController:
     def _watched_entities(self) -> set[str]:
         config = self.config
         values = {
-            config.binary_entity_id,
             config.grid_entity_id,
             config.production_entity_id,
             config.consumption_entity_id,
             config.battery_soc_entity_id,
             config.battery_status_entity_id,
+            config.battery_power_entity_id,
             *(load.entity_id for load in config.loads),
         }
         return {value for value in values if value}
@@ -190,9 +191,7 @@ class SolarSpenderController:
     def _feedback_entities(self) -> frozenset[str]:
         """Return entities that must report freshly after every load change."""
         config = self.config
-        if config.source_type == SOURCE_BINARY:
-            values = {config.binary_entity_id}
-        elif config.source_type == SOURCE_GRID:
+        if config.source_type == SOURCE_GRID:
             values = {config.grid_entity_id}
         else:
             values = {
@@ -200,7 +199,11 @@ class SolarSpenderController:
                 config.consumption_entity_id,
             }
         if config.battery_policy != BATTERY_DISABLED:
-            values.add(config.battery_status_entity_id)
+            values.add(
+                config.battery_power_entity_id
+                if config.battery_direction_source == BATTERY_DIRECTION_POWER
+                else config.battery_status_entity_id
+            )
         if config.battery_policy in {
             BATTERY_CHARGING_OR_SOC,
             BATTERY_FULL_IDLE_FOR_PROBE,
@@ -280,12 +283,6 @@ class SolarSpenderController:
                         + ", ".join(sorted(pending_reports)),
                     )
                     return
-                if self._binary_debounce_until is not None:
-                    self._set_state(
-                        STATE_WAITING_FEEDBACK,
-                        self.reason,
-                    )
-                    return
                 assessment.record_vote(
                     supported=self.surplus_available,
                     accepted_at=datetime.now().astimezone(),
@@ -356,12 +353,6 @@ class SolarSpenderController:
                 self._feedback_assessment is not None,
             ):
                 self._record("Cleared unsupported-load memory after surplus ended")
-            if self._binary_debounce_until is not None:
-                self._set_state(
-                    STATE_SPENDING if self._leases else STATE_MONITORING,
-                    self.reason,
-                )
-                return
             if not self.battery_allowed:
                 if self.state == STATE_PROBING:
                     await self._async_shed_one("battery discharging during probe")
@@ -389,6 +380,10 @@ class SolarSpenderController:
             self._next_load_not_before = None
             await self._async_activate_one(reason)
         finally:
+            async_dispatcher_send(
+                self.hass,
+                f"{CONTROLLER_STATUS_UPDATED}_{self.entry_id}",
+            )
             self._reconciling = False
 
     def _update_inputs(self) -> None:
@@ -399,53 +394,6 @@ class SolarSpenderController:
 
     def _update_source(self) -> None:
         config = self.config
-        if config.source_type == SOURCE_BINARY:
-            state = self.hass.states.get(config.binary_entity_id)
-            self.headroom_w = None
-            self.raw_source_value = state.state if state is not None else None
-            if (
-                state is None
-                or state.state in _INVALID_STATES
-                or state.state.lower() not in {"on", "off", "true", "false", "1", "0"}
-            ):
-                self.source_valid = False
-                self.surplus_available = False
-                self._clear_binary_debounce()
-                self.reason = "binary headroom unavailable or invalid"
-                return
-            self.source_valid = True
-            raw_on = state.state.lower() in {"on", "true", "1"}
-            now = datetime.now().astimezone()
-            decision = debounce_binary_source(
-                surplus_available=self.surplus_available,
-                raw_on=raw_on,
-                raw_changed_at=state.last_changed,
-                now=now,
-                on_delay_minutes=config.binary_on_delay_minutes,
-                off_delay_minutes=config.binary_off_delay_minutes,
-            )
-            self.surplus_available = decision.surplus_available
-            self._binary_debounce_until = decision.pending_until
-            if decision.pending_until is not None:
-                self._schedule_binary_debounce(decision.pending_until)
-                transition = "entry" if raw_on else "exit"
-                remaining = max(
-                    0,
-                    int((decision.pending_until - now).total_seconds()),
-                )
-                self.reason = (
-                    f"binary headroom {'on' if raw_on else 'off'}; "
-                    f"{transition} debounce {remaining}s remaining"
-                )
-            else:
-                self._cancel_binary_debounce_timer()
-                self.reason = (
-                    "binary headroom on"
-                    if self.surplus_available
-                    else "binary headroom off"
-                )
-            return
-
         if config.source_type == SOURCE_GRID:
             watts = self._power_value(config.grid_entity_id)
             self.raw_source_value = watts
@@ -454,7 +402,9 @@ class SolarSpenderController:
                 return
             self.source_valid = True
             export_w = watts if config.grid_export_positive else -watts
-            self.headroom_w = export_w - config.export_reserve_w
+            decision_w = export_w - config.export_reserve_w
+            self.headroom_w = decision_w
+            self.opportunity_power_w = None
         else:
             production_w = self._power_value(config.production_entity_id)
             consumption_w = self._power_value(config.consumption_entity_id)
@@ -463,15 +413,19 @@ class SolarSpenderController:
                 self._clear_source("production or consumption sensor unavailable")
                 return
             self.source_valid = True
-            self.headroom_w = production_w - consumption_w
+            decision_w = production_w - consumption_w
+            self.headroom_w = decision_w
+            self.opportunity_power_w = None
             if config.source_type == SOURCE_CURTAILED:
-                # In a curtailed system this is an opportunity signal, not hidden headroom.
-                self.headroom_w = production_w
+                # Production is only an opportunity signal; hidden headroom is unknowable.
+                self.headroom_w = None
+                self.opportunity_power_w = production_w
+                decision_w = production_w
 
         if self.surplus_available:
-            self.surplus_available = self.headroom_w > config.exit_threshold_w
+            self.surplus_available = decision_w > config.exit_threshold_w
         else:
-            self.surplus_available = self.headroom_w >= config.entry_threshold_w
+            self.surplus_available = decision_w >= config.entry_threshold_w
         self.reason = (
             f"source {'available' if self.surplus_available else 'below threshold'}"
         )
@@ -480,6 +434,7 @@ class SolarSpenderController:
         self.source_valid = False
         self.surplus_available = False
         self.headroom_w = None
+        self.opportunity_power_w = None
         self.reason = reason
 
     def _power_value(self, entity_id: str) -> float | None:
@@ -489,6 +444,8 @@ class SolarSpenderController:
         try:
             value = float(state.state)
         except (TypeError, ValueError):
+            return None
+        if not isfinite(value):
             return None
         unit = str(state.attributes.get("unit_of_measurement", "W")).lower()
         if unit == "kw":
@@ -502,10 +459,16 @@ class SolarSpenderController:
     def _battery_allows_activation(self) -> tuple[bool, str]:
         config = self.config
         if config.battery_policy == BATTERY_DISABLED:
+            self.battery_direction = "not_configured"
+            self.battery_power_w = None
             return True, "battery policy disabled"
-        status = self._battery_status()
-        charging = status in config.charging_states
-        discharging = status in config.discharging_states
+        status = self._battery_direction()
+        if config.battery_direction_source == BATTERY_DIRECTION_POWER:
+            charging = status == "charging"
+            discharging = status == "discharging"
+        else:
+            charging = status in config.charging_states
+            discharging = status in config.discharging_states
         soc = self._numeric_state(config.battery_soc_entity_id)
         if config.battery_policy == BATTERY_REQUIRE_CHARGING:
             return charging, "battery is not charging"
@@ -526,25 +489,46 @@ class SolarSpenderController:
             return allowed, "battery must be full and idle before probing"
         return False, "invalid battery policy"
 
-    def _battery_status(self) -> str:
+    def _battery_direction(self) -> str:
+        if self.config.battery_direction_source == BATTERY_DIRECTION_POWER:
+            power_w = self._power_value(self.config.battery_power_entity_id)
+            if power_w is None:
+                self.battery_direction = "unknown"
+                self.battery_power_w = None
+                return ""
+            decision = direction_from_power(
+                power_w,
+                charging_positive=self.config.battery_power_charging_positive,
+                threshold_w=self.config.battery_power_threshold_w,
+            )
+            self.battery_direction = decision.direction
+            self.battery_power_w = decision.charging_positive_w
+            return decision.direction
         state = self.hass.states.get(self.config.battery_status_entity_id)
         if state is None or state.state in _INVALID_STATES:
+            self.battery_direction = "unknown"
+            self.battery_power_w = None
             return ""
         if (
             state.entity_id.startswith("binary_sensor.")
             and state.attributes.get("device_class") == "battery_charging"
         ):
-            return "charging" if state.state == "on" else "idle"
-        return state.state.lower()
+            direction = "charging" if state.state == "on" else "idle"
+        else:
+            direction = state.state.lower()
+        self.battery_direction = direction
+        self.battery_power_w = None
+        return direction
 
     def _numeric_state(self, entity_id: str) -> float | None:
         state = self.hass.states.get(entity_id)
         if state is None or state.state in _INVALID_STATES:
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
         except (TypeError, ValueError):
             return None
+        return value if isfinite(value) else None
 
     async def _async_activate_one(self, reason: str) -> None:
         if self._pending_activation is not None:
@@ -947,33 +931,6 @@ class SolarSpenderController:
         ):
             self._pending_unsupported_release = None
 
-    def _schedule_binary_debounce(self, deadline: datetime) -> None:
-        """Reconcile when a continuous binary transition becomes eligible."""
-        self._cancel_binary_debounce_timer()
-        seconds = max(
-            0,
-            (deadline - datetime.now().astimezone()).total_seconds(),
-        )
-        self._binary_debounce_scheduled = async_call_later(
-            self.hass,
-            seconds,
-            self._async_binary_debounce_complete,
-        )
-
-    def _cancel_binary_debounce_timer(self) -> None:
-        if self._binary_debounce_scheduled is not None:
-            self._binary_debounce_scheduled()
-            self._binary_debounce_scheduled = None
-
-    def _clear_binary_debounce(self) -> None:
-        self._binary_debounce_until = None
-        self._cancel_binary_debounce_timer()
-
-    @callback
-    def _async_binary_debounce_complete(self, _now: datetime) -> None:
-        self._binary_debounce_scheduled = None
-        self.hass.async_create_task(self.async_reconcile("binary debounce complete"))
-
     def _schedule_reconcile(self, seconds: float) -> None:
         if self._scheduled is not None:
             self._scheduled()
@@ -1000,6 +957,70 @@ class SolarSpenderController:
             at=datetime.now().astimezone(),
         )
 
+    def _load_status(self, load: LoadConfig) -> dict[str, Any]:
+        """Explain ownership and current eligibility for one configured AC."""
+        state = self.hass.states.get(load.entity_id)
+        state_value = state.state if state is not None else None
+        owned = load.entity_id in self._leases
+        blocked_for_cycle = (
+            load.entity_id in self._cycle_memory.blocked_loads
+            or self._cycle_memory.combination_is_blocked(
+                frozenset({*self._leases, load.entity_id})
+            )
+        )
+        can_be_owned = False
+        if owned:
+            ownership_reason = "Owned by Solar Spender"
+        elif (
+            self._pending_activation is not None
+            and self._pending_activation[0].entity_id == load.entity_id
+        ):
+            ownership_reason = "Solar Spender is starting this AC"
+        elif not load.enabled:
+            ownership_reason = "Disabled in Solar Spender"
+        elif state is None or state_value in _INVALID_STATES:
+            ownership_reason = "Unavailable; Solar Spender cannot own it"
+        elif state_value != STATE_OFF:
+            ownership_reason = (
+                "Already running or changed manually; Solar Spender does not own it"
+            )
+        elif blocked_for_cycle:
+            ownership_reason = "Blocked for this solar opportunity"
+        else:
+            last_off = self._last_off.get(load.entity_id)
+            minimum_off_until = (
+                last_off + timedelta(seconds=load.min_off_seconds)
+                if last_off is not None
+                else None
+            )
+            if (
+                minimum_off_until is not None
+                and datetime.now().astimezone() < minimum_off_until
+            ):
+                ownership_reason = (
+                    "Waiting for minimum-off time before it can be owned"
+                )
+            else:
+                can_be_owned = True
+                ownership_reason = "Available for Solar Spender to own"
+        return {
+            "entity_id": load.entity_id,
+            "enabled": load.enabled,
+            "owned": owned,
+            "can_be_owned": can_be_owned,
+            "ownership_reason": ownership_reason,
+            "blocked_for_cycle": blocked_for_cycle,
+            "effective_expected_power_w": self._expected_draws().get(
+                load.entity_id
+            ),
+            "learned_draw_samples": (
+                self._learned_draws[load.entity_id].samples
+                if load.entity_id in self._learned_draws
+                else 0
+            ),
+            "state": state_value,
+        }
+
     def status(self) -> dict[str, Any]:
         """Return a frontend-safe controller snapshot."""
         feedback_assessment = self._feedback_assessment
@@ -1017,10 +1038,10 @@ class SolarSpenderController:
             "source_valid": self.source_valid,
             "surplus_available": self.surplus_available,
             "headroom_w": self.headroom_w,
-            "binary_debounce_until": self._binary_debounce_until.isoformat()
-            if self._binary_debounce_until is not None
-            else None,
+            "opportunity_power_w": self.opportunity_power_w,
             "battery_allowed": self.battery_allowed,
+            "battery_direction": self.battery_direction,
+            "battery_power_w": self.battery_power_w,
             "owned_loads": [
                 {"entity_id": lease.load.entity_id, "activated_at": lease.activated_at.isoformat()}
                 for lease in self._leases.values()
@@ -1060,30 +1081,6 @@ class SolarSpenderController:
                 "unsupported_at_or_above_w": self._cycle_memory.upper_unsupported_w,
             },
             "pending_unsupported_release": self._pending_unsupported_release,
-            "loads": [
-                {
-                    "entity_id": load.entity_id,
-                    "enabled": load.enabled,
-                    "owned": load.entity_id in self._leases,
-                    "blocked_for_cycle": (
-                        load.entity_id in self._cycle_memory.blocked_loads
-                        or self._cycle_memory.combination_is_blocked(
-                            frozenset({*self._leases, load.entity_id})
-                        )
-                    ),
-                    "effective_expected_power_w": self._expected_draws().get(
-                        load.entity_id
-                    ),
-                    "learned_draw_samples": (
-                        self._learned_draws[load.entity_id].samples
-                        if load.entity_id in self._learned_draws
-                        else 0
-                    ),
-                    "state": self.hass.states.get(load.entity_id).state
-                    if self.hass.states.get(load.entity_id)
-                    else None,
-                }
-                for load in self.config.loads
-            ],
+            "loads": [self._load_status(load) for load in self.config.loads],
             "history": self._event_history,
         }

@@ -15,7 +15,6 @@ export function reflectSelectorValue(selector, value) {
 
 export function sourceConfigurationVisibility(sourceType) {
   return {
-    binary: sourceType === "binary",
     grid: sourceType === "grid_flow",
     production:
       sourceType === "production_consumption" ||
@@ -24,9 +23,36 @@ export function sourceConfigurationVisibility(sourceType) {
   };
 }
 
-export function batteryConfigurationVisibility(policy) {
+export function sourceModeDescription(sourceType) {
   return {
-    status: policy !== "disabled",
+    grid_flow:
+      "Best when your grid meter reports live export. Solar Spender uses only export above your reserve and margins.",
+    production_consumption:
+      "Use when solar production minus whole-home consumption truly represents spare power. This is not suitable when the inverter hides unused capacity.",
+    curtailed_production:
+      "For zero-export systems where unused solar capacity is hidden. Solar Spender cautiously tries one AC, waits for fresh readings, and keeps it only when solar supports it.",
+  }[sourceType] || "Choose how Solar Spender detects spare solar power.";
+}
+
+export function batteryPolicyDescription(policy) {
+  return {
+    disabled:
+      "Battery state does not block new AC starts.",
+    require_charging:
+      "Start another AC only while the battery is measurably charging.",
+    charging_or_soc:
+      "Start another AC while charging, or after battery state of charge reaches the configured threshold.",
+    full_idle_for_probe:
+      "Before testing hidden solar capacity, require a full battery with power flow inside the idle threshold.",
+  }[policy] || "Choose how battery state affects new AC starts.";
+}
+
+export function batteryConfigurationVisibility(policy, directionSource = "power") {
+  const enabled = policy !== "disabled";
+  return {
+    direction: enabled,
+    status: enabled && directionSource === "status",
+    power: enabled && directionSource === "power",
     soc:
       policy === "charging_or_soc" ||
       policy === "full_idle_for_probe",
@@ -36,13 +62,23 @@ export function batteryConfigurationVisibility(policy) {
   };
 }
 
+export function loadOwnershipPresentation(load) {
+  if (load.owned) return { style: "success", label: "Owned" };
+  if (!load.enabled) return { style: "secondary", label: "Disabled" };
+  if (load.can_be_owned) return { style: "primary", label: "Can be owned" };
+  if (load.blocked_for_cycle) {
+    return { style: "warning", label: "Blocked this cycle" };
+  }
+  return { style: "secondary", label: "Not owned" };
+}
+
 export function statusPresentations(status, options) {
   const enabled = Boolean(status?.enabled);
   const stateLabels = {
     blocked_battery: "Blocked by battery",
     disabled: "Disabled",
     monitoring: "Monitoring",
-    probing: "Probing",
+    probing: "Testing one AC",
     shedding: "Releasing loads",
     spending: "Spending solar",
     waiting_feedback: "Waiting for feedback",
@@ -59,14 +95,14 @@ export function statusPresentations(status, options) {
           value: "Disabled",
           detail: "Automation is paused. Solar Spender will not start or release ACs.",
         },
-    surplus: enabled
+    surplus: status?.source_valid
       ? {
           value: status?.surplus_available ? "Available" : "Unavailable",
           detail: null,
         }
       : {
-          value: "Inactive",
-          detail: "Enable Solar Spender to evaluate this source for load control.",
+          value: "Unknown",
+          detail: "The configured source is unavailable or incomplete.",
         },
     battery: !batteryConfigured
       ? {
@@ -80,9 +116,15 @@ export function statusPresentations(status, options) {
           }
         : {
             value: status?.battery_allowed ? "Open" : "Blocking",
-            detail: status?.battery_allowed
+            detail: `${status?.battery_allowed
               ? "The configured battery condition permits a new activation."
-              : "New activations are paused by the battery condition.",
+              : "New activations are paused by the battery condition."}`
+              + (status?.battery_direction
+                ? ` Direction: ${status.battery_direction}.`
+                : "")
+              + (typeof status?.battery_power_w === "number"
+                ? ` Normalized battery power: ${Math.round(status.battery_power_w)} W (positive is charging).`
+                : ""),
           },
     feedback: !enabled
       ? {

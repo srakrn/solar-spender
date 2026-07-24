@@ -5,27 +5,30 @@ import { readFileSync } from "node:fs";
 import {
   applySelectorValue,
   batteryConfigurationVisibility,
+  batteryPolicyDescription,
+  loadOwnershipPresentation,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
   relevantPowerEntityIds,
   reflectSelectorValue,
   shouldLoadPanel,
   sourceConfigurationVisibility,
+  sourceModeDescription,
   statusPresentations,
 } from "./panel-helpers.js";
 
 test("entity selector changes are retained for configuration save", () => {
-  const original = { binary_entity_id: "" };
+  const original = { grid_entity_id: "" };
   const updated = applySelectorValue(
     original,
-    "binary_entity_id",
-    "binary_sensor.deye_inverter_solar_system_headroom",
+    "grid_entity_id",
+    "sensor.grid_power",
   );
 
-  assert.equal(original.binary_entity_id, "");
+  assert.equal(original.grid_entity_id, "");
   assert.equal(
-    updated.binary_entity_id,
-    "binary_sensor.deye_inverter_solar_system_headroom",
+    updated.grid_entity_id,
+    "sensor.grid_power",
   );
 });
 
@@ -44,20 +47,12 @@ test("live hass updates do not reload an initialized or loading panel", () => {
 });
 
 test("source configuration exposes only fields for the selected strategy", () => {
-  assert.deepEqual(sourceConfigurationVisibility("binary"), {
-    binary: true,
-    grid: false,
-    production: false,
-    curtailed: false,
-  });
   assert.deepEqual(sourceConfigurationVisibility("grid_flow"), {
-    binary: false,
     grid: true,
     production: false,
     curtailed: false,
   });
   assert.deepEqual(sourceConfigurationVisibility("curtailed_production"), {
-    binary: false,
     grid: false,
     production: true,
     curtailed: true,
@@ -66,17 +61,23 @@ test("source configuration exposes only fields for the selected strategy", () =>
 
 test("battery configuration hides status and SOC when disabled", () => {
   assert.deepEqual(batteryConfigurationVisibility("disabled"), {
+    direction: false,
     status: false,
+    power: false,
     soc: false,
     threshold: false,
   });
-  assert.deepEqual(batteryConfigurationVisibility("require_charging"), {
-    status: true,
+  assert.deepEqual(batteryConfigurationVisibility("require_charging", "power"), {
+    direction: true,
+    status: false,
+    power: true,
     soc: false,
     threshold: false,
   });
-  assert.deepEqual(batteryConfigurationVisibility("charging_or_soc"), {
+  assert.deepEqual(batteryConfigurationVisibility("charging_or_soc", "status"), {
+    direction: true,
     status: true,
+    power: false,
     soc: true,
     threshold: true,
   });
@@ -97,9 +98,46 @@ test("disabled status cards describe inactive and unconfigured states honestly",
     value: "Disabled",
     detail: "Automation is paused. Solar Spender will not start or release ACs.",
   });
-  assert.equal(cards.surplus.value, "Inactive");
+  assert.equal(cards.surplus.value, "Unknown");
   assert.equal(cards.battery.value, "Not configured");
   assert.equal(cards.feedback.value, "Idle");
+});
+
+test("headroom remains visible while automation is disabled", () => {
+  const cards = statusPresentations(
+    {
+      enabled: false,
+      state: "disabled",
+      source_valid: true,
+      surplus_available: true,
+      feedback: { waiting: false },
+    },
+    { battery_policy: "disabled" },
+  );
+
+  assert.equal(cards.surplus.value, "Available");
+});
+
+test("source and battery modes explain the selected behavior", () => {
+  assert.match(sourceModeDescription("curtailed_production"), /zero-export/i);
+  assert.match(sourceModeDescription("curtailed_production"), /one AC/i);
+  assert.match(sourceModeDescription("grid_flow"), /live export/i);
+  assert.match(batteryPolicyDescription("full_idle_for_probe"), /idle threshold/i);
+});
+
+test("load ownership presentation distinguishes eligible, disabled, and manual loads", () => {
+  assert.deepEqual(
+    loadOwnershipPresentation({ can_be_owned: true, enabled: true, owned: false }),
+    { style: "primary", label: "Can be owned" },
+  );
+  assert.equal(
+    loadOwnershipPresentation({ can_be_owned: false, enabled: false, owned: false }).label,
+    "Disabled",
+  );
+  assert.equal(
+    loadOwnershipPresentation({ can_be_owned: false, enabled: true, owned: false }).label,
+    "Not owned",
+  );
 });
 
 test("enabled status cards use readable controller state labels", () => {
@@ -158,7 +196,10 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /min_on_seconds: 300/);
   assert.match(source, /feedback_sample_count: 3/);
   assert.doesNotMatch(source, /utility/i);
+  assert.doesNotMatch(source, /Binary headroom/);
   assert.match(source, /Equal priorities follow the AC list order/);
+  assert.match(source, /data-load-enabled-index/);
+  assert.match(source, /battery_power_entity_id/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {

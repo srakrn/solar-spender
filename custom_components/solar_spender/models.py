@@ -10,15 +10,22 @@ from homeassistant.const import ATTR_TEMPERATURE
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
+    BATTERY_CHARGING_OR_SOC,
+    BATTERY_DISABLED,
+    BATTERY_DIRECTION_POWER,
+    BATTERY_DIRECTION_SOURCES,
+    BATTERY_DIRECTION_STATUS,
     BATTERY_FULL_IDLE_FOR_PROBE,
     BATTERY_POLICIES,
+    BATTERY_REQUIRE_CHARGING,
+    CONF_BATTERY_DIRECTION_SOURCE,
     CONF_BATTERY_FULL_THRESHOLD,
     CONF_BATTERY_POLICY,
+    CONF_BATTERY_POWER_CHARGING_POSITIVE,
+    CONF_BATTERY_POWER_ENTITY_ID,
+    CONF_BATTERY_POWER_THRESHOLD_W,
     CONF_BATTERY_SOC_ENTITY_ID,
     CONF_BATTERY_STATUS_ENTITY_ID,
-    CONF_BINARY_ENTITY_ID,
-    CONF_BINARY_OFF_DELAY_MINUTES,
-    CONF_BINARY_ON_DELAY_MINUTES,
     CONF_CHARGING_STATES,
     CONF_CONSUMPTION_ENTITY_ID,
     CONF_DISCHARGING_STATES,
@@ -99,9 +106,6 @@ class SolarSpenderConfig:
 
     enabled: bool
     source_type: str
-    binary_entity_id: str
-    binary_on_delay_minutes: float
-    binary_off_delay_minutes: float
     grid_entity_id: str
     grid_export_positive: bool
     production_entity_id: str
@@ -117,6 +121,10 @@ class SolarSpenderConfig:
     battery_policy: str
     battery_soc_entity_id: str
     battery_status_entity_id: str
+    battery_power_entity_id: str
+    battery_direction_source: str
+    battery_power_charging_positive: bool
+    battery_power_threshold_w: float
     battery_full_threshold: float
     charging_states: frozenset[str]
     discharging_states: frozenset[str]
@@ -154,17 +162,6 @@ class SolarSpenderConfig:
                 "feedback interval must be at least one minute and "
                 "next-load delay must not be negative"
             )
-        binary_on_delay = float(merged[CONF_BINARY_ON_DELAY_MINUTES])
-        binary_off_delay = float(merged[CONF_BINARY_OFF_DELAY_MINUTES])
-        if (
-            not isfinite(binary_on_delay)
-            or not isfinite(binary_off_delay)
-            or binary_on_delay < 0
-            or binary_off_delay < 0
-        ):
-            raise ConfigurationError(
-                "binary debounce durations must be finite and not negative"
-            )
         loads = tuple(LoadConfig.from_dict(item) for item in merged[CONF_LOADS])
         entity_ids = [load.entity_id for load in loads]
         if len(entity_ids) != len(set(entity_ids)):
@@ -172,12 +169,27 @@ class SolarSpenderConfig:
         battery_policy = str(merged[CONF_BATTERY_POLICY])
         if battery_policy not in BATTERY_POLICIES:
             raise ConfigurationError("unsupported battery policy")
+        battery_direction_source = str(merged[CONF_BATTERY_DIRECTION_SOURCE])
+        if battery_direction_source not in BATTERY_DIRECTION_SOURCES:
+            raise ConfigurationError("unsupported battery direction source")
+        battery_power_threshold_w = float(merged[CONF_BATTERY_POWER_THRESHOLD_W])
+        battery_full_threshold = float(merged[CONF_BATTERY_FULL_THRESHOLD])
+        if (
+            not isfinite(battery_power_threshold_w)
+            or battery_power_threshold_w < 0
+        ):
+            raise ConfigurationError(
+                "battery power threshold must be finite and not negative"
+            )
+        if (
+            not isfinite(battery_full_threshold)
+            or battery_full_threshold < 0
+            or battery_full_threshold > 100
+        ):
+            raise ConfigurationError("battery SOC threshold must be from 0 to 100")
         config = cls(
             enabled=bool(merged[CONF_ENABLED]),
             source_type=source_type,
-            binary_entity_id=str(merged[CONF_BINARY_ENTITY_ID]),
-            binary_on_delay_minutes=binary_on_delay,
-            binary_off_delay_minutes=binary_off_delay,
             grid_entity_id=str(merged[CONF_GRID_ENTITY_ID]),
             grid_export_positive=bool(merged[CONF_GRID_EXPORT_POSITIVE]),
             production_entity_id=str(merged[CONF_PRODUCTION_ENTITY_ID]),
@@ -193,7 +205,13 @@ class SolarSpenderConfig:
             battery_policy=battery_policy,
             battery_soc_entity_id=str(merged[CONF_BATTERY_SOC_ENTITY_ID]),
             battery_status_entity_id=str(merged[CONF_BATTERY_STATUS_ENTITY_ID]),
-            battery_full_threshold=float(merged[CONF_BATTERY_FULL_THRESHOLD]),
+            battery_power_entity_id=str(merged[CONF_BATTERY_POWER_ENTITY_ID]),
+            battery_direction_source=battery_direction_source,
+            battery_power_charging_positive=bool(
+                merged[CONF_BATTERY_POWER_CHARGING_POSITIVE]
+            ),
+            battery_power_threshold_w=battery_power_threshold_w,
+            battery_full_threshold=battery_full_threshold,
             charging_states=frozenset(
                 str(state).lower() for state in merged[CONF_CHARGING_STATES]
             ),
@@ -207,8 +225,6 @@ class SolarSpenderConfig:
     def _validate_source_entities(self) -> None:
         if not self.enabled:
             return
-        if self.source_type == "binary" and not self.binary_entity_id:
-            raise ConfigurationError("binary_entity_id is required for binary source")
         if self.source_type == "grid_flow" and not self.grid_entity_id:
             raise ConfigurationError("grid_entity_id is required for grid-flow source")
         if self.source_type in {"production_consumption", "curtailed_production"}:
@@ -221,7 +237,31 @@ class SolarSpenderConfig:
                 raise ConfigurationError(
                     "curtailed_production requires full_idle_for_probe battery policy"
                 )
-            if not self.battery_soc_entity_id or not self.battery_status_entity_id:
+        if self.battery_policy == BATTERY_DISABLED:
+            return
+        if self.battery_policy in {
+            BATTERY_CHARGING_OR_SOC,
+            BATTERY_FULL_IDLE_FOR_PROBE,
+        } and not self.battery_soc_entity_id:
+            raise ConfigurationError(
+                "selected battery policy requires a battery SOC entity"
+            )
+        if self.battery_policy in {
+            BATTERY_REQUIRE_CHARGING,
+            BATTERY_CHARGING_OR_SOC,
+            BATTERY_FULL_IDLE_FOR_PROBE,
+        }:
+            if (
+                self.battery_direction_source == BATTERY_DIRECTION_STATUS
+                and not self.battery_status_entity_id
+            ):
                 raise ConfigurationError(
-                    "curtailed_production requires battery SOC and status entities"
+                    "battery status entity is required for status direction"
+                )
+            if (
+                self.battery_direction_source == BATTERY_DIRECTION_POWER
+                and not self.battery_power_entity_id
+            ):
+                raise ConfigurationError(
+                    "battery power entity is required for power direction"
                 )
