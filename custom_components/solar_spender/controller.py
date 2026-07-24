@@ -47,6 +47,10 @@ from .feedback import (
 )
 from .models import LoadConfig, SolarSpenderConfig
 from .selection import first_to_activate, first_to_release
+from .source import (
+    observable_surplus_available,
+    zero_export_opportunity_available,
+)
 from .storage import LearningStore
 
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE}
@@ -81,6 +85,7 @@ class SolarSpenderController:
         self.source_valid = False
         self.headroom_w: float | None = None
         self.opportunity_power_w: float | None = None
+        self.source_deficit_w: float | None = None
         self._leases: dict[str, Lease] = {}
         self._last_off: dict[str, datetime] = {}
         self._pending_activation: tuple[LoadConfig, dict[str, Any], dict[str, Any]] | None = None
@@ -405,6 +410,7 @@ class SolarSpenderController:
             decision_w = export_w - config.export_reserve_w
             self.headroom_w = decision_w
             self.opportunity_power_w = None
+            self.source_deficit_w = None
         else:
             production_w = self._power_value(config.production_entity_id)
             consumption_w = self._power_value(config.consumption_entity_id)
@@ -416,16 +422,34 @@ class SolarSpenderController:
             decision_w = production_w - consumption_w
             self.headroom_w = decision_w
             self.opportunity_power_w = None
+            self.source_deficit_w = None
             if config.source_type == SOURCE_CURTAILED:
-                # Production is only an opportunity signal; hidden headroom is unknowable.
+                # A small uncovered deficit permits a trial; it is not hidden headroom.
+                opportunity = zero_export_opportunity_available(
+                    was_available=self.surplus_available,
+                    production_w=production_w,
+                    consumption_w=consumption_w,
+                    minimum_production_w=config.minimum_production_w,
+                    entry_deficit_w=config.entry_threshold_w,
+                    exit_deficit_w=config.exit_threshold_w,
+                )
                 self.headroom_w = None
                 self.opportunity_power_w = production_w
-                decision_w = production_w
+                self.source_deficit_w = opportunity.deficit_w
+                self.surplus_available = opportunity.available
+                self.reason = (
+                    "zero-export test opportunity available"
+                    if opportunity.available
+                    else "zero-export deficit or production outside limits"
+                )
+                return
 
-        if self.surplus_available:
-            self.surplus_available = decision_w > config.exit_threshold_w
-        else:
-            self.surplus_available = decision_w >= config.entry_threshold_w
+        self.surplus_available = observable_surplus_available(
+            was_available=self.surplus_available,
+            headroom_w=decision_w,
+            entry_threshold_w=config.entry_threshold_w,
+            exit_threshold_w=config.exit_threshold_w,
+        )
         self.reason = (
             f"source {'available' if self.surplus_available else 'below threshold'}"
         )
@@ -435,6 +459,7 @@ class SolarSpenderController:
         self.surplus_available = False
         self.headroom_w = None
         self.opportunity_power_w = None
+        self.source_deficit_w = None
         self.reason = reason
 
     def _power_value(self, entity_id: str) -> float | None:
@@ -1039,6 +1064,7 @@ class SolarSpenderController:
             "surplus_available": self.surplus_available,
             "headroom_w": self.headroom_w,
             "opportunity_power_w": self.opportunity_power_w,
+            "source_deficit_w": self.source_deficit_w,
             "battery_allowed": self.battery_allowed,
             "battery_direction": self.battery_direction,
             "battery_power_w": self.battery_power_w,

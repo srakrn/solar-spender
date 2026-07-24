@@ -74,3 +74,17 @@ class ConfigurationMigrationTests(unittest.TestCase):
         )
 
         self.assertEqual(migrated["battery_direction_source"], "status")
+
+    def test_zero_export_thresholds_migrate_to_deficit_hysteresis(self) -> None:
+        migrated = MIGRATION.version_4_options(
+            {
+                "source_type": "curtailed_production",
+                "entry_threshold_w": 300,
+                "exit_threshold_w": 100,
+                "loads": [],
+            }
+        )
+
+        self.assertEqual(migrated["minimum_production_w"], 300)
+        self.assertEqual(migrated["entry_threshold_w"], 100)
+        self.assertEqual(migrated["exit_threshold_w"], 300)

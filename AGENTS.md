@@ -159,8 +159,10 @@ Some zero-export systems curtail production to match demand. In that case,
 remains. Never label that value “available headroom.” Support it only through an
 explicit curtailed-production strategy:
 
-- require minimum production plus a probe-ready battery as the opportunity
-  condition;
+- require minimum production, a probe-ready battery, and a low
+  `consumption_w - production_w` deficit as the opportunity condition;
+- enter when deficit is at/below a configured entry maximum and exit when it
+  reaches a larger configured exit maximum;
 - activate at most one candidate load as a probe;
 - wait for both an AC startup allowance and a measurement settling window;
 - retain the load only when production rose to cover its observed marginal
@@ -174,6 +176,11 @@ Prefer an explicit grid-flow or battery-power feedback sensor for this strategy.
 Production and consumption alone can show a deficit if their semantics cover
 the same boundary, but they cannot reveal the remaining hidden ceiling before a
 probe.
+
+For zero-export deficit hysteresis require
+`0 <= entry_deficit_w < exit_deficit_w`. A low deficit is permission to probe,
+not proof of spare power. Keep minimum production as a separate guard so
+nighttime zero production/consumption cannot qualify.
 
 A probe is not free: the grid or battery may need to cover it until measurement
 settles and minimum-on time permits release. Do not probe unless the configured
@@ -248,9 +255,12 @@ These are safety requirements, not implementation suggestions:
   remainder of the current spending cycle. Do not treat headroom returning
   because that load was removed as a new opportunity. Clear the block only
   after fresh feedback observes no surplus while no load is owned.
-- For numeric sources, enter surplus only at/above the entry threshold and
-  remain latched until at/below the exit threshold. Require
+- For observable numeric sources, enter surplus only at/above the entry
+  threshold and remain latched until at/below the exit threshold. Require
   `entry_threshold > exit_threshold`.
+- For zero-export opportunity deficits, invert that ordering: enter at/below the
+  lower maximum deficit, remain latched below the higher exit deficit, and
+  require `entry_deficit < exit_deficit`.
 - Invalid source data clears the surplus latch.
 - When surplus is lost, release the lowest-priority owned load whose minimum-on
   time has elapsed. Confirm it, then wait for fresh post-settling feedback
@@ -307,8 +317,9 @@ Required configuration:
 - source mode and source entities;
 - export reserve and valid entry/exit margins for grid-flow mode;
 - entry and exit thresholds for production/consumption mode;
-- optional curtailed-production probing policy, opportunity threshold,
-  grid-import/battery-discharge limits, and settling duration;
+- optional curtailed-production probing policy, minimum production,
+  entry/exit deficit thresholds, grid-import/battery-discharge limits, and
+  settling duration;
 - action-confirmation timeout and measurement-settling duration;
 - optional battery policy, SOC/status/power entities, direction source, power
   sign and idle threshold, SOC threshold, and normalized charging/discharging

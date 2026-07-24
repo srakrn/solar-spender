@@ -29,8 +29,8 @@ function sourceConfigurationVisibility(sourceType) {
 function sourceModeDescription(sourceType) {
   return {
     grid_flow: "Best when your grid meter reports live export. Solar Spender uses only export above your reserve and margins.",
-    production_consumption: "Use when solar production minus whole-home consumption truly represents spare power. This is not suitable when the inverter hides unused capacity.",
-    curtailed_production: "For zero-export systems where unused solar capacity is hidden. Solar Spender cautiously tries one AC, waits for fresh readings, and keeps it only when solar supports it."
+    production_consumption: "Use when production minus whole-home consumption is directly measurable spare power. Larger positive values are better, so entry is higher than exit.",
+    curtailed_production: "For zero-export systems where unused capacity is hidden. A small consumption-minus-production deficit permits a cautious one-AC test; it does not prove excess power."
   }[sourceType] || "Choose how Solar Spender detects spare solar power.";
 }
 function batteryPolicyDescription(policy) {
@@ -152,6 +152,7 @@ var DEFAULT_OPTIONS = {
   consumption_entity_id: "",
   entry_threshold_w: 300,
   exit_threshold_w: 100,
+  minimum_production_w: 300,
   export_reserve_w: 0,
   settling_seconds: 300,
   feedback_sample_count: 3,
@@ -169,7 +170,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.4.0";
+var PANEL_VERSION = "0.4.1";
 var KEEP_CURRENT = "__keep_current__";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
@@ -383,8 +384,33 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         const value = event.detail?.value;
         if (value === void 0 || value === String(this._options[key])) return;
         reflectSelectorValue(selector, value);
+        const previousSource = this._options.source_type;
         const options = this._collectOptions();
         options[key] = key === "enabled" || key === "grid_export_positive" || key === "battery_power_charging_positive" ? value === "true" : value;
+        if (key === "source_type" && value === "curtailed_production") {
+          options.entry_threshold_w = Math.min(
+            Number(options.entry_threshold_w),
+            Number(options.exit_threshold_w)
+          );
+          options.exit_threshold_w = Math.max(
+            Number(this._options.entry_threshold_w),
+            Number(this._options.exit_threshold_w)
+          );
+          if (options.entry_threshold_w === options.exit_threshold_w) {
+            options.exit_threshold_w += 200;
+          }
+        } else if (key === "source_type" && previousSource === "curtailed_production") {
+          const lower = Math.min(
+            Number(options.entry_threshold_w),
+            Number(options.exit_threshold_w)
+          );
+          const higher = Math.max(
+            Number(options.entry_threshold_w),
+            Number(options.exit_threshold_w)
+          );
+          options.entry_threshold_w = higher;
+          options.exit_threshold_w = lower;
+        }
         this._options = options;
         if (key === "source_type" || key === "battery_policy" || key === "battery_direction_source") {
           this._render();
@@ -611,16 +637,17 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         <div class="col-md-4">${this._numberField("entry_threshold_w", "Entry margin", "Spend only when export above the reserve reaches this margin.", 0, null, "W")}</div>
         <div class="col-md-4">${this._numberField("exit_threshold_w", "Exit margin", "Stop spending at this lower margin to prevent oscillation.", 0, null, "W")}</div>`;
     } else {
-      const entryLabel = visibility.curtailed ? "Minimum solar production" : "Entry threshold";
-      const entryHelp = visibility.curtailed ? "Begin considering a one-AC test only when solar production reaches this level." : "Surplus becomes available at or above this value.";
-      const exitLabel = visibility.curtailed ? "Stop-testing threshold" : "Exit threshold";
-      const exitHelp = visibility.curtailed ? "Stop considering hidden-capacity tests when production falls to this lower level." : "Surplus remains latched until it falls to this lower value.";
+      const entryLabel = visibility.curtailed ? "Maximum deficit to start testing" : "Entry threshold";
+      const entryHelp = visibility.curtailed ? "Start a one-AC test when consumption minus production is at or below this value. Lower is stricter." : "Surplus becomes available at or above this value.";
+      const exitLabel = visibility.curtailed ? "Deficit that stops testing" : "Exit threshold";
+      const exitHelp = visibility.curtailed ? "After entry, keep the opportunity active until consumption minus production reaches this larger value. Must be greater than the start threshold." : "Surplus remains latched until it falls to this lower value.";
       fields = `
         <div class="col-md-6">${this._entityField("production_entity_id", "Production power entity", "Current solar production from a measurement power sensor using W or kW.")}</div>
         <div class="col-md-6">${this._entityField("consumption_entity_id", "Consumption power entity", "Whole-home consumption measured at the same electrical boundary as production.")}</div>
-        <div class="col-md-6">${this._numberField("entry_threshold_w", entryLabel, entryHelp, 0, null, "W")}</div>
-        <div class="col-md-6">${this._numberField("exit_threshold_w", exitLabel, exitHelp, 0, null, "W")}</div>
-        ${visibility.curtailed ? `<div class="col-12"><div class="alert alert-warning mb-0">Zero-export testing requires <strong>Full battery before zero-export testing</strong>. Solar Spender changes only one AC before checking fresh readings.</div></div>` : ""}`;
+        ${visibility.curtailed ? `<div class="col-md-4">${this._numberField("minimum_production_w", "Minimum solar production", "Do not test hidden capacity below this production level. This prevents nighttime zero production and zero consumption from qualifying.", 0, null, "W")}</div>` : ""}
+        <div class="${visibility.curtailed ? "col-md-4" : "col-md-6"}">${this._numberField("entry_threshold_w", entryLabel, entryHelp, 0, null, "W")}</div>
+        <div class="${visibility.curtailed ? "col-md-4" : "col-md-6"}">${this._numberField("exit_threshold_w", exitLabel, exitHelp, 0, null, "W")}</div>
+        ${visibility.curtailed ? `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Deficit = consumption \u2212 production.</strong> With start ${this._escape(this._options.entry_threshold_w)} W and stop ${this._escape(this._options.exit_threshold_w)} W: a deficit at or below the start value permits a test; after entry, the opportunity remains active until deficit reaches the larger stop value.</div></div><div class="col-12"><div class="alert alert-warning mb-0">A small deficit is only permission to test\u2014it does not prove spare solar exists. Zero-export testing also requires <strong>Full battery before zero-export testing</strong>, and Solar Spender changes only one AC before checking fresh readings.</div></div>` : `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Measured headroom = production \u2212 consumption.</strong> Headroom must reach the higher entry threshold to start spending. Once active, it may fall between the thresholds; Solar Spender stops only when it reaches the lower exit threshold.</div></div>`}`;
     }
     return `
       <div class="config-section">
@@ -725,7 +752,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   }
   _surplusDetail(status) {
     if (this._options.source_type === "curtailed_production") {
-      return typeof status.opportunity_power_w === "number" ? `${Math.round(status.opportunity_power_w)} W solar production; hidden headroom cannot be measured directly.` : "Hidden headroom cannot be measured directly.";
+      return typeof status.opportunity_power_w === "number" && typeof status.source_deficit_w === "number" ? `${Math.round(status.opportunity_power_w)} W production \xB7 ${Math.round(status.source_deficit_w)} W consumption-minus-production deficit \xB7 hidden headroom is unknown.` : "Hidden headroom cannot be measured directly.";
     }
     return this._watts(status.headroom_w);
   }

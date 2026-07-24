@@ -142,6 +142,9 @@ are disabled and moved to an incomplete production/consumption configuration so
 the user must deliberately select and validate a numeric strategy before
 automation can resume. Existing battery status configurations migrate to the
 status-direction path; other installations default to battery power direction.
+Schema v4 separates zero-export minimum production from deficit hysteresis.
+Existing zero-export entry/exit values migrate conservatively into a lower
+entry deficit, higher exit deficit, and a separate minimum-production guard.
 
 The runtime timing controls are also exposed under one Solar Spender device as
 Home Assistant entities: an Automation switch and number entities for first
@@ -185,8 +188,9 @@ In **curtailed-production** strategy, do not present
 `production - consumption` as available headroom. Configuration additionally
 contains:
 
-- an opportunity condition based on minimum PV production while the battery is
-  full and idle;
+- minimum PV production while the battery is full and idle;
+- a maximum entry deficit and a larger exit deficit, where
+  `deficit_w = consumption_w - production_w`;
 - optional signed grid-flow power, strongly recommended;
 - optional battery charge/discharge power;
 - maximum tolerated grid import and battery discharge during a probe;
@@ -199,6 +203,21 @@ production and whole-home consumption sensors cover the same electrical boundary
 and their deficit is trustworthy. If the controller cannot distinguish added
 solar production from imported or battery power, it must report
 “unobservable” and stop probing rather than guess.
+
+The zero-export deficit is an opportunity condition, not a spare-power
+measurement. Enter when production meets its minimum and
+`deficit_w <= entry_deficit_w`. Once entered, stay latched while
+`deficit_w < exit_deficit_w`; exit at or above the larger exit deficit. Require
+`0 <= entry_deficit_w < exit_deficit_w`. For example, with 100 W entry and
+300 W exit, an 80 W deficit permits a one-AC test, 200 W retains the opportunity
+after entry, and 300 W ends it. Minimum production prevents nighttime
+`consumption=0` and `production=0` from qualifying.
+
+This differs from observable production/consumption mode: there,
+`production-consumption` is treated as a measurable spare-power budget and
+larger values are better. In zero-export mode, the inverter hides unused
+capacity, so a small deficit merely permits a staged test and never determines
+how large the next AC may be.
 
 ### Battery gate
 
@@ -315,8 +334,10 @@ Clarifications:
 
 - A battery gate blocks new starts. If it closes while loads are owned, the
   source still determines gradual shedding; this avoids abrupt comfort changes.
-- Numeric sources use hysteresis rather than a time debounce: the surplus latch
-  opens at the entry threshold and closes at the lower exit threshold.
+- Observable numeric sources use hysteresis rather than a time debounce: the
+  surplus latch opens at the higher entry threshold and closes at the lower
+  exit threshold. Zero-export deficit mode is inverted: its test opportunity
+  opens at the lower maximum deficit and closes at the higher exit deficit.
 - A timer never authorizes another load change by itself. After every activation
   or release, each configured source and battery-feedback entity must produce a
   new Home Assistant report after each sampling boundary. The strict majority
@@ -507,51 +528,58 @@ trial shows no unintended shutdowns or rapid cycling.
 
 The release is not acceptable until all of these are automated:
 
-1. A numeric source below its entry threshold does not activate a load.
-2. A source crossing the entry threshold latches surplus available.
-3. A value between entry and exit thresholds preserves the prior latch state.
-4. Crossing the exit threshold clears the surplus latch.
-5. Invalid, stale, removed, `unknown`, `unavailable`, NaN, and infinity inputs
+1. An observable numeric source below its entry threshold does not activate a
+   load.
+2. An observable source crossing the higher entry threshold latches surplus
+   available.
+3. Observable headroom between its higher entry and lower exit thresholds
+   preserves the prior latch state.
+4. Observable headroom reaching the lower exit threshold clears the surplus
+   latch.
+5. A zero-export deficit at or below its lower entry maximum opens a test
+   opportunity, a value between entry and exit preserves it, and a deficit
+   reaching the higher exit maximum closes it.
+6. Invalid, stale, removed, `unknown`, `unavailable`, NaN, and infinity inputs
    clear the latch and fail safe.
-6. Power sensors in `W` and `kW` yield the same normalized decision.
-7. Both grid-flow sign conventions normalize to the same internal values.
-8. No load starts unless export exceeds reserve plus the entry margin.
-9. Loads shed when spendable power reaches the lower exit margin.
-10. Candidate selection rejects an AC whose conservative estimate exceeds the
+7. Power sensors in `W` and `kW` yield the same normalized decision.
+8. Both grid-flow sign conventions normalize to the same internal values.
+9. No load starts unless export exceeds reserve plus the entry margin.
+10. Loads shed when spendable power reaches the lower exit margin.
+11. Candidate selection rejects an AC whose conservative estimate exceeds the
     observable spendable-power budget.
-11. A full non-charging battery passes `charging_or_soc` but not
+12. A full non-charging battery passes `charging_or_soc` but not
     `require_charging`.
-12. `full_idle_for_probe` opens only for known full-and-idle battery state.
-13. Below-full SOC, charging, discharging, or unavailable battery data blocks a
+13. `full_idle_for_probe` opens only for known full-and-idle battery state.
+14. Below-full SOC, charging, discharging, or unavailable battery data blocks a
     curtailed-system probe.
-14. Battery discharge beginning during a probe marks it unsupported and rolls
+15. Battery discharge beginning during a probe marks it unsupported and rolls
     it back safely.
-15. Activation changes only one AC before confirmation and measurement
+16. Activation changes only one AC before confirmation and measurement
     settling.
-16. The controller re-checks headroom before every AC.
-17. Curtailed mode never equates near-zero net flow with zero hidden potential.
-18. A supported probe is retained; an importing/discharging probe is rolled
+17. The controller re-checks headroom before every AC.
+18. Curtailed mode never equates near-zero net flow with zero hidden potential.
+19. A supported probe is retained; an importing/discharging probe is rolled
     back.
-19. An unobservable probe stops further activation and reports its reason.
-20. Overlapping unrelated demand invalidates a marginal-power learning sample.
-21. Loss of surplus releases the lowest-priority owned AC whose minimum-on time
+20. An unobservable probe stops further activation and reports its reason.
+21. Overlapping unrelated demand invalidates a marginal-power learning sample.
+22. Loss of surplus releases the lowest-priority owned AC whose minimum-on time
     has elapsed.
-22. If all owned ACs are inside minimum-on time, no release occurs and the
+23. If all owned ACs are inside minimum-on time, no release occurs and the
     earliest eligibility deadline is scheduled.
-23. Surplus recovery while waiting cancels the pending release.
-24. After the last release, the controller returns to monitoring.
-25. A released AC remains ineligible until its own minimum-off deadline.
-26. An AC already on before the cycle is neither modified nor released.
-27. A manual command-field change relinquishes ownership, while a normal
+24. Surplus recovery while waiting cancels the pending release.
+25. After the last release, the controller returns to monitoring.
+26. A released AC remains ineligible until its own minimum-off deadline.
+27. An AC already on before the cycle is neither modified nor released.
+28. A manual command-field change relinquishes ownership, while a normal
     `hvac_action` change does not.
-28. A `dry` profile without a target temperature never calls
+29. A `dry` profile without a target temperature never calls
     `climate.set_temperature`.
-29. Automatic release restores the pre-activation temperature/fan profile;
+30. Automatic release restores the pre-activation temperature/fan profile;
     manual override prevents restoration.
-30. Minimum-on/off deadlines survive integration reload and Home Assistant
+31. Minimum-on/off deadlines survive integration reload and Home Assistant
     restart conservatively.
-31. Two simultaneous configuration editors cannot lose updates silently.
-32. Non-admin users cannot mutate configuration or issue control commands.
+32. Two simultaneous configuration editors cannot lose updates silently.
+33. Non-admin users cannot mutate configuration or issue control commands.
 
 ## 10. Later roadmap
 

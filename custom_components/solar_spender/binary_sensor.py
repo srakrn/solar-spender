@@ -64,6 +64,7 @@ class SolarSpenderHeadroomBinarySensor(BinarySensorEntity):
             "source_type": self._controller.config.source_type,
             "headroom_w": self._controller.headroom_w,
             "opportunity_power_w": self._controller.opportunity_power_w,
+            "source_deficit_w": self._controller.source_deficit_w,
             "automation_enabled": self._controller.config.enabled,
         }
 

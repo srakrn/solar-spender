@@ -28,9 +28,9 @@ export function sourceModeDescription(sourceType) {
     grid_flow:
       "Best when your grid meter reports live export. Solar Spender uses only export above your reserve and margins.",
     production_consumption:
-      "Use when solar production minus whole-home consumption truly represents spare power. This is not suitable when the inverter hides unused capacity.",
+      "Use when production minus whole-home consumption is directly measurable spare power. Larger positive values are better, so entry is higher than exit.",
     curtailed_production:
-      "For zero-export systems where unused solar capacity is hidden. Solar Spender cautiously tries one AC, waits for fresh readings, and keeps it only when solar supports it.",
+      "For zero-export systems where unused capacity is hidden. A small consumption-minus-production deficit permits a cautious one-AC test; it does not prove excess power.",
   }[sourceType] || "Choose how Solar Spender detects spare solar power.";
 }
 

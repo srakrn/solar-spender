@@ -45,6 +45,10 @@ valid source and load options are saved and automation is enabled.
 ## Current safety model
 
 - Numeric sources use entry/exit hysteresis.
+- Observable sources treat larger `production - consumption` headroom as
+  better. Zero-export testing instead enters on a low
+  `consumption - production` deficit and exits at a larger deficit; this is only
+  permission to test one AC, not proof of spare capacity.
 - Each climate load has independent minimum-on and minimum-off durations.
 - Solar Spender changes one load at a time and confirms the result from a
   configurable majority of fresh, spaced source reports.

@@ -38,6 +38,7 @@ from .const import (
     CONF_GRID_ENTITY_ID,
     CONF_GRID_EXPORT_POSITIVE,
     CONF_LOADS,
+    CONF_MINIMUM_PRODUCTION_W,
     CONF_NEXT_LOAD_DELAY_MINUTES,
     CONF_PRODUCTION_ENTITY_ID,
     CONF_SETTLING_SECONDS,
@@ -112,6 +113,7 @@ class SolarSpenderConfig:
     consumption_entity_id: str
     entry_threshold_w: float
     exit_threshold_w: float
+    minimum_production_w: float
     export_reserve_w: float
     settling_seconds: int
     feedback_sample_count: int
@@ -138,9 +140,27 @@ class SolarSpenderConfig:
             raise ConfigurationError("unsupported source_type")
         entry = float(merged[CONF_ENTRY_THRESHOLD_W])
         exit_ = float(merged[CONF_EXIT_THRESHOLD_W])
-        if entry <= exit_:
-            raise ConfigurationError("entry_threshold_w must exceed exit_threshold_w")
-        if entry < 0 or exit_ < 0 or float(merged[CONF_EXPORT_RESERVE_W]) < 0:
+        minimum_production = float(merged[CONF_MINIMUM_PRODUCTION_W])
+        export_reserve = float(merged[CONF_EXPORT_RESERVE_W])
+        if source_type == "curtailed_production":
+            if entry >= exit_:
+                raise ConfigurationError(
+                    "zero-export entry deficit must be lower than exit deficit"
+                )
+        elif entry <= exit_:
+            raise ConfigurationError(
+                "entry_threshold_w must exceed exit_threshold_w"
+            )
+        if (
+            not isfinite(entry)
+            or not isfinite(exit_)
+            or not isfinite(minimum_production)
+            or not isfinite(export_reserve)
+            or entry < 0
+            or exit_ < 0
+            or minimum_production < 0
+            or export_reserve < 0
+        ):
             raise ConfigurationError("thresholds and export reserve must not be negative")
         settling = int(merged[CONF_SETTLING_SECONDS])
         if settling < 0:
@@ -196,7 +216,8 @@ class SolarSpenderConfig:
             consumption_entity_id=str(merged[CONF_CONSUMPTION_ENTITY_ID]),
             entry_threshold_w=entry,
             exit_threshold_w=exit_,
-            export_reserve_w=float(merged[CONF_EXPORT_RESERVE_W]),
+            minimum_production_w=minimum_production,
+            export_reserve_w=export_reserve,
             settling_seconds=settling,
             feedback_sample_count=sample_count,
             feedback_sample_interval_minutes=sample_interval,

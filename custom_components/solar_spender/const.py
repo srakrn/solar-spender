@@ -13,7 +13,7 @@ PLATFORMS: Final[list[Platform]] = [
     Platform.SWITCH,
 ]
 
-PANEL_VERSION: Final = "0.4.0"
+PANEL_VERSION: Final = "0.4.1"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
@@ -32,6 +32,7 @@ CONF_PRODUCTION_ENTITY_ID: Final = "production_entity_id"
 CONF_CONSUMPTION_ENTITY_ID: Final = "consumption_entity_id"
 CONF_ENTRY_THRESHOLD_W: Final = "entry_threshold_w"
 CONF_EXIT_THRESHOLD_W: Final = "exit_threshold_w"
+CONF_MINIMUM_PRODUCTION_W: Final = "minimum_production_w"
 CONF_EXPORT_RESERVE_W: Final = "export_reserve_w"
 CONF_SETTLING_SECONDS: Final = "settling_seconds"
 CONF_FEEDBACK_SAMPLE_COUNT: Final = "feedback_sample_count"
@@ -85,6 +86,7 @@ DEFAULT_OPTIONS: Final = {
     CONF_CONSUMPTION_ENTITY_ID: "",
     CONF_ENTRY_THRESHOLD_W: 300.0,
     CONF_EXIT_THRESHOLD_W: 100.0,
+    CONF_MINIMUM_PRODUCTION_W: 300.0,
     CONF_EXPORT_RESERVE_W: 0.0,
     CONF_SETTLING_SECONDS: 300,
     CONF_FEEDBACK_SAMPLE_COUNT: 3,

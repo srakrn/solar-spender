@@ -120,7 +120,8 @@ test("headroom remains visible while automation is disabled", () => {
 
 test("source and battery modes explain the selected behavior", () => {
   assert.match(sourceModeDescription("curtailed_production"), /zero-export/i);
-  assert.match(sourceModeDescription("curtailed_production"), /one AC/i);
+  assert.match(sourceModeDescription("curtailed_production"), /one.?AC/i);
+  assert.match(sourceModeDescription("curtailed_production"), /does not prove/i);
   assert.match(sourceModeDescription("grid_flow"), /live export/i);
   assert.match(batteryPolicyDescription("full_idle_for_probe"), /idle threshold/i);
 });
@@ -200,6 +201,11 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /Equal priorities follow the AC list order/);
   assert.match(source, /data-load-enabled-index/);
   assert.match(source, /battery_power_entity_id/);
+  assert.match(source, /Maximum deficit to start testing/);
+  assert.match(source, /Deficit that stops testing/);
+  assert.match(source, /minimum_production_w/);
+  assert.match(source, /Deficit = consumption − production/);
+  assert.match(source, /Measured headroom = production − consumption/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {
