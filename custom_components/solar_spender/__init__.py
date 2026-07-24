@@ -24,6 +24,7 @@ from .const import (
     RUNTIME_OPTIONS_UPDATED,
 )
 from .controller import SolarSpenderController
+from .migration import without_legacy_utility
 from .models import SolarSpenderConfig
 from .websocket_api import async_register_websocket_api
 
@@ -44,6 +45,20 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     )
     async_register_websocket_api(hass)
     _async_register_panel(hass)
+    return True
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant,
+    entry: SolarSpenderConfigEntry,
+) -> bool:
+    """Migrate saved options without changing the user's AC order."""
+    if entry.version < 2:
+        hass.config_entries.async_update_entry(
+            entry,
+            options=without_legacy_utility(dict(entry.options)),
+            version=2,
+        )
     return True
 
 

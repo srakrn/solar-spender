@@ -54,7 +54,6 @@ class LoadConfig:
     temperature: float | None
     fan_mode: str | None
     expected_power_w: float | None
-    utility: float
     min_on_seconds: int
     min_off_seconds: int
     enabled: bool
@@ -88,7 +87,6 @@ class LoadConfig:
             temperature=temperature,
             fan_mode=fan_mode,
             expected_power_w=expected_power_w,
-            utility=float(value.get("utility", 1)),
             min_on_seconds=min_on_seconds,
             min_off_seconds=min_off_seconds,
             enabled=bool(value.get("enabled", True)),

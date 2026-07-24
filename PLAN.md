@@ -80,7 +80,7 @@ the probe is unsupported and is rolled back safely.
 Activation is staged:
 
 1. observe that the source has crossed its entry condition;
-2. rank eligible ACs using priority, utility, and estimated marginal draw;
+2. rank eligible ACs by user priority, with stable list order breaking ties;
 3. start one AC;
 4. wait for startup and measurement settling;
 5. retain or release it from fresh feedback;
@@ -118,8 +118,8 @@ create ownership. If a user changes a commanded field, ownership is
 relinquished, and Solar Spender will not later turn that AC off.
 
 The initial AC profiles support normal climate modes including `dry` when the
-entity advertises it. Optional humidity bounds can later improve load utility
-and prevent unnecessary dehumidification.
+entity advertises it. Optional humidity bounds can later prevent unnecessary
+dehumidification.
 
 ## 3. Configuration model
 
@@ -230,7 +230,7 @@ Each entry contains:
 - desired HVAC mode (optional);
 - desired target temperature (optional);
 - desired fan mode (optional);
-- optional expected power and utility weight;
+- optional expected power;
 - minimum-on duration;
 - minimum-off duration;
 - enabled flag.
@@ -252,8 +252,9 @@ Start with a deterministic greedy controller, not a combinatorial optimizer:
    configured comfort/humidity constraints.
 2. Estimate each AC's marginal power from its configured expected power and
    successful past observations.
-3. Rank candidates by user priority/utility, then prefer a smaller estimated
-   draw when candidates have equal utility.
+3. Rank candidates by ascending user priority. Stable configuration order breaks
+   ties. Expected draw determines whether a load fits but does not change the
+   user's chosen order.
 4. In observable-surplus or grid-flow mode, select only a candidate whose
    conservative draw estimate fits the spendable-power budget.
 5. Activate one candidate.
@@ -268,16 +269,11 @@ with room conditions, so recent observations should outweigh old ones without
 being treated as a guaranteed rating.
 
 Once measurement quality is proven, an optional selector may evaluate all
-subsets using conservative upper estimates:
-
-```text
-maximize sum(utility_i)
-subject to estimated_total_draw <= conservative_available_budget
-```
-
-With five ACs, exhaustive subset evaluation is trivial. It still cannot solve
-the hidden-capacity problem; the available budget must come from direct
-headroom, forecast, or probes. The greedy feedback loop is the v1 behavior.
+subsets using conservative upper estimates. That later feature will need an
+explicit, understandable user preference model before it can choose between
+equally feasible combinations. It still cannot solve the hidden-capacity
+problem; the available budget must come from direct headroom, forecast, or
+probes. The priority-ordered greedy feedback loop is the v1 behavior.
 
 ## 4. State machine
 

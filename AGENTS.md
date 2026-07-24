@@ -327,8 +327,8 @@ Required configuration:
 - optional battery policy, SOC/status/power entities, SOC threshold, and
   normalized charging/discharging state mappings;
 - ordered AC definitions with entity ID, priority, optional HVAC mode, optional
-  target temperature, optional fan mode, optional expected marginal power and
-  utility weight, and minimum on/off durations. `dry` with no temperature is a
+  target temperature, optional fan mode, optional expected marginal power, and
+  minimum on/off durations. `dry` with no temperature is a
   valid profile.
 
 Validate entity domain, supported HVAC and fan modes, temperature range/step,

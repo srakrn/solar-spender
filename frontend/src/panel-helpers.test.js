@@ -157,6 +157,8 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /<ha-selector data-load-select-index=/);
   assert.match(source, /min_on_seconds: 300/);
   assert.match(source, /feedback_sample_count: 3/);
+  assert.doesNotMatch(source, /utility/i);
+  assert.match(source, /Equal priorities follow the AC list order/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {

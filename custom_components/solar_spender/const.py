@@ -9,7 +9,7 @@ from homeassistant.const import Platform
 DOMAIN: Final = "solar_spender"
 PLATFORMS: Final[list[Platform]] = [Platform.NUMBER, Platform.SWITCH]
 
-PANEL_VERSION: Final = "0.3.0"
+PANEL_VERSION: Final = "0.3.1"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"

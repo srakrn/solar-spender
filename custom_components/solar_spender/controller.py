@@ -43,6 +43,7 @@ from .feedback import (
     debounce_binary_source,
 )
 from .models import LoadConfig, SolarSpenderConfig
+from .selection import first_to_activate, first_to_release
 from .storage import LearningStore
 
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE}
@@ -613,16 +614,9 @@ class SolarSpenderController:
             if not self._cycle_memory.fits_upper_bound(candidate_total_w):
                 continue
             candidates.append(load)
-        if not candidates:
-            return None
-        return min(
-            candidates,
-            key=lambda load: (
-                -load.utility,
-                load.priority,
-                effective_draws[load.entity_id] or float("inf"),
-            ),
-        )
+        # ``candidates`` retains configuration order, so Python's stable
+        # minimum gives equally prioritized loads a predictable tie-break.
+        return first_to_activate(candidates, lambda load: load.priority)
 
     async def _async_activate_load(self, load: LoadConfig) -> None:
         previous_profile = self._capture_profile(load.entity_id)
@@ -744,14 +738,12 @@ class SolarSpenderController:
             if deadlines:
                 self._schedule_reconcile(max(0, (min(deadlines) - now).total_seconds()))
             return
-        lease = (
-            eligible[0]
-            if target_entity_id is not None
-            else max(
-                eligible,
-                key=lambda item: (item.load.priority, -item.load.utility),
-            )
+        lease = eligible[0] if target_entity_id is not None else first_to_release(
+            eligible,
+            lambda item: item.load.priority,
         )
+        if lease is None:
+            return
         if block_for_cycle:
             self._cycle_memory.record_combination(
                 frozenset(self._leases),

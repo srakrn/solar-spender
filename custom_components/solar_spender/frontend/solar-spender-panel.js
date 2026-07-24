@@ -142,7 +142,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.3.0";
+var PANEL_VERSION = "0.3.1";
 var KEEP_CURRENT = "__keep_current__";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
@@ -524,7 +524,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   }
   _addLoad() {
     const options = this._collectOptions();
-    options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, utility: 1, min_on_seconds: 300, min_off_seconds: 900, enabled: true });
+    options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, min_on_seconds: 300, min_off_seconds: 900, enabled: true });
     this._options = options;
     this._render();
   }
@@ -623,9 +623,8 @@ var SolarSpenderPanelHost = class extends HTMLElement {
           <div class="col-md-6">${this._loadSelect(index, "hvac_mode", "Desired mode", "Only modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan mode", "Optional fan setting. Only fan modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadNumber(index, "temperature", "Target temperature", `Optional target in the selected AC's ${capabilities.minTemp}\u2013${capabilities.maxTemp} \xB0C range.`, capabilities.minTemp, capabilities.maxTemp, "\xB0C", capabilities.tempStep)}</div>
-          <div class="col-md-4">${this._loadNumber(index, "priority", "Priority", "Lower numbers are preferred before higher numbers.", 0, null, "")}</div>
-          <div class="col-md-4">${this._loadNumber(index, "utility", "Utility", "Higher utility wins before priority when selecting ACs.", 0, null, "")}</div>
-          <div class="col-md-4">${this._loadNumber(index, "expected_power_w", "Expected draw", "Optional conservative running-power estimate for budget-aware selection.", 0, null, "W")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "priority", "Priority", "Lower numbers start first and stop last. Equal priorities follow the AC list order.", 0, null, "")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Expected draw", "Optional conservative running-power estimate used only to decide whether the AC fits.", 0, null, "W")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_on_seconds", "Minimum on", "Seconds the AC must stay on before Solar Spender may release it.", 0, null, "seconds")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_off_seconds", "Minimum off", "Seconds Solar Spender waits before it can start this AC again.", 0, null, "seconds")}</div>
         </div></div></ha-card>`;

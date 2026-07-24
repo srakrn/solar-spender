@@ -23,6 +23,7 @@ from .const import (
     SOURCE_PRODUCTION,
 )
 from .controller import SolarSpenderController
+from .migration import without_legacy_utility
 from .models import ConfigurationError, SolarSpenderConfig
 
 
@@ -70,7 +71,10 @@ async def websocket_get_config(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
         return
-    connection.send_result(msg["id"], {**DEFAULT_OPTIONS, **entry.options})
+    connection.send_result(
+        msg["id"],
+        without_legacy_utility({**DEFAULT_OPTIONS, **entry.options}),
+    )
 
 
 @websocket_api.websocket_command(
@@ -90,7 +94,7 @@ async def websocket_update_config(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
         return
-    options = {**DEFAULT_OPTIONS, **msg["options"]}
+    options = without_legacy_utility({**DEFAULT_OPTIONS, **msg["options"]})
     try:
         config = SolarSpenderConfig.from_options(options)
         _validate_configured_entities(hass, config)
