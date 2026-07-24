@@ -9,6 +9,29 @@ export function applySelectorValue(options, key, value) {
   };
 }
 
+export function sourceConfigurationVisibility(sourceType) {
+  return {
+    binary: sourceType === "binary",
+    grid: sourceType === "grid_flow",
+    production:
+      sourceType === "production_consumption" ||
+      sourceType === "curtailed_production",
+    curtailed: sourceType === "curtailed_production",
+  };
+}
+
+export function batteryConfigurationVisibility(policy) {
+  return {
+    status: policy !== "disabled",
+    soc:
+      policy === "charging_or_soc" ||
+      policy === "full_idle_for_probe",
+    threshold:
+      policy === "charging_or_soc" ||
+      policy === "full_idle_for_probe",
+  };
+}
+
 export function relevantPowerEntityIds(states) {
   return Object.values(states || {})
     .filter((state) => {

@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 
 import {
   applySelectorValue,
+  batteryConfigurationVisibility,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
   relevantPowerEntityIds,
   shouldLoadPanel,
+  sourceConfigurationVisibility,
 } from "./panel-helpers.js";
 
 test("entity selector changes are retained for configuration save", () => {
@@ -28,6 +30,45 @@ test("live hass updates do not reload an initialized or loading panel", () => {
   assert.equal(shouldLoadPanel(false, false), true);
   assert.equal(shouldLoadPanel(false, true), false);
   assert.equal(shouldLoadPanel(true, false), false);
+});
+
+test("source configuration exposes only fields for the selected strategy", () => {
+  assert.deepEqual(sourceConfigurationVisibility("binary"), {
+    binary: true,
+    grid: false,
+    production: false,
+    curtailed: false,
+  });
+  assert.deepEqual(sourceConfigurationVisibility("grid_flow"), {
+    binary: false,
+    grid: true,
+    production: false,
+    curtailed: false,
+  });
+  assert.deepEqual(sourceConfigurationVisibility("curtailed_production"), {
+    binary: false,
+    grid: false,
+    production: true,
+    curtailed: true,
+  });
+});
+
+test("battery configuration hides status and SOC when disabled", () => {
+  assert.deepEqual(batteryConfigurationVisibility("disabled"), {
+    status: false,
+    soc: false,
+    threshold: false,
+  });
+  assert.deepEqual(batteryConfigurationVisibility("require_charging"), {
+    status: true,
+    soc: false,
+    threshold: false,
+  });
+  assert.deepEqual(batteryConfigurationVisibility("charging_or_soc"), {
+    status: true,
+    soc: true,
+    threshold: true,
+  });
 });
 
 test("power entities are restricted to W and kW power sensors", () => {
