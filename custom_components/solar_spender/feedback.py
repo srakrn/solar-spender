@@ -6,6 +6,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 
+def append_bounded_event(
+    history: list[dict[str, str]],
+    *,
+    message: str,
+    at: datetime,
+    limit: int = 30,
+) -> list[dict[str, str]]:
+    """Append one event while coalescing consecutive identical decisions."""
+    event = {"at": at.isoformat(), "message": message}
+    if history and history[-1]["message"] == message:
+        return [*history[:-1], event]
+    return [*history, event][-limit:]
+
+
 @dataclass(frozen=True, slots=True)
 class FeedbackBarrier:
     """Require every feedback entity to report after an action has settled."""

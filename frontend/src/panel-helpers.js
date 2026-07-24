@@ -32,6 +32,71 @@ export function batteryConfigurationVisibility(policy) {
   };
 }
 
+export function statusPresentations(status, options) {
+  const enabled = Boolean(status?.enabled);
+  const stateLabels = {
+    blocked_battery: "Blocked by battery",
+    disabled: "Disabled",
+    monitoring: "Monitoring",
+    probing: "Probing",
+    shedding: "Releasing loads",
+    spending: "Spending solar",
+    waiting_feedback: "Waiting for feedback",
+  };
+  const batteryConfigured = options?.battery_policy !== "disabled";
+
+  return {
+    controller: enabled
+      ? {
+          value: stateLabels[status?.state] || "Starting",
+          detail: status?.reason || "Evaluating the configured source.",
+        }
+      : {
+          value: "Disabled",
+          detail: "Automation is paused. Solar Spender will not start or release ACs.",
+        },
+    surplus: enabled
+      ? {
+          value: status?.surplus_available ? "Available" : "Unavailable",
+          detail: null,
+        }
+      : {
+          value: "Inactive",
+          detail: "Enable Solar Spender to evaluate this source for load control.",
+        },
+    battery: !batteryConfigured
+      ? {
+          value: "Not configured",
+          detail: "No battery condition is applied to new activations.",
+        }
+      : !enabled
+        ? {
+            value: "Inactive",
+            detail: "The configured battery condition is evaluated only while Solar Spender is enabled.",
+          }
+        : {
+            value: status?.battery_allowed ? "Open" : "Blocking",
+            detail: status?.battery_allowed
+              ? "The configured battery condition permits a new activation."
+              : "New activations are paused by the battery condition.",
+          },
+    feedback: !enabled
+      ? {
+          value: "Idle",
+          detail: "Fresh feedback is required only after Solar Spender changes a load.",
+        }
+      : status?.feedback?.waiting
+        ? {
+            value: "Waiting for fresh data",
+            detail: (status.feedback.pending_entities || []).join(", "),
+          }
+        : {
+            value: "Ready",
+            detail: "No load change is waiting for source confirmation.",
+          },
+  };
+}
+
 export function relevantPowerEntityIds(states) {
   return Object.values(states || {})
     .filter((state) => {

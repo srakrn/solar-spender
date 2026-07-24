@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   applySelectorValue,
@@ -9,6 +10,7 @@ import {
   relevantPowerEntityIds,
   shouldLoadPanel,
   sourceConfigurationVisibility,
+  statusPresentations,
 } from "./panel-helpers.js";
 
 test("entity selector changes are retained for configuration save", () => {
@@ -69,6 +71,75 @@ test("battery configuration hides status and SOC when disabled", () => {
     soc: true,
     threshold: true,
   });
+});
+
+test("disabled status cards describe inactive and unconfigured states honestly", () => {
+  const cards = statusPresentations(
+    {
+      enabled: false,
+      state: "disabled",
+      battery_allowed: true,
+      feedback: { waiting: false },
+    },
+    { battery_policy: "disabled" },
+  );
+
+  assert.deepEqual(cards.controller, {
+    value: "Disabled",
+    detail: "Automation is paused. Solar Spender will not start or release ACs.",
+  });
+  assert.equal(cards.surplus.value, "Inactive");
+  assert.equal(cards.battery.value, "Not configured");
+  assert.equal(cards.feedback.value, "Idle");
+});
+
+test("enabled status cards use readable controller state labels", () => {
+  const cards = statusPresentations(
+    {
+      enabled: true,
+      state: "waiting_feedback",
+      reason: "waiting for fresh feedback",
+      battery_allowed: false,
+      feedback: {
+        waiting: true,
+        pending_entities: ["sensor.grid_power"],
+      },
+    },
+    { battery_policy: "charging_or_soc" },
+  );
+
+  assert.equal(cards.controller.value, "Waiting for feedback");
+  assert.equal(cards.battery.value, "Blocking");
+  assert.equal(cards.feedback.detail, "sensor.grid_power");
+});
+
+test("configured battery condition is inactive while Solar Spender is disabled", () => {
+  const cards = statusPresentations(
+    {
+      enabled: false,
+      state: "disabled",
+      battery_allowed: true,
+      feedback: { waiting: false },
+    },
+    { battery_policy: "charging_or_soc" },
+  );
+
+  assert.deepEqual(cards.battery, {
+    value: "Inactive",
+    detail: "The configured battery condition is evaluated only while Solar Spender is enabled.",
+  });
+});
+
+test("panel configuration uses Home Assistant selectors instead of native form inputs", () => {
+  const source = readFileSync(
+    new URL("./solar-spender-panel.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /<input\b|<select\b/);
+  assert.doesNotMatch(source, /data-bs-toggle=["']tooltip["']/);
+  assert.match(source, /<ha-selector data-number-key=/);
+  assert.match(source, /<ha-selector data-load-select-index=/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {

@@ -50,6 +50,45 @@ class FeedbackBarrierTests(unittest.TestCase):
         self.assertTrue(barrier.is_ready(reports))
 
 
+class EventHistoryTests(unittest.TestCase):
+    """Verify repeated reconciliation reasons do not bury useful history."""
+
+    def test_consecutive_duplicate_updates_timestamp_without_adding_row(self) -> None:
+        first = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+        second = first + timedelta(minutes=5)
+        history = FEEDBACK.append_bounded_event(
+            [],
+            message="disabled",
+            at=first,
+        )
+
+        history = FEEDBACK.append_bounded_event(
+            history,
+            message="disabled",
+            at=second,
+        )
+
+        self.assertEqual(
+            history,
+            [{"at": second.isoformat(), "message": "disabled"}],
+        )
+
+    def test_nonconsecutive_duplicate_remains_visible(self) -> None:
+        now = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+        history: list[dict[str, str]] = []
+        for index, message in enumerate(("disabled", "enabled", "disabled")):
+            history = FEEDBACK.append_bounded_event(
+                history,
+                message=message,
+                at=now + timedelta(minutes=index),
+            )
+
+        self.assertEqual(
+            [event["message"] for event in history],
+            ["disabled", "enabled", "disabled"],
+        )
+
+
 class BinaryDebounceTests(unittest.TestCase):
     """Verify entry and exit require continuous stable binary states."""
 

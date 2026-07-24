@@ -34,7 +34,12 @@ from .const import (
     STATE_SPENDING,
     STATE_WAITING_FEEDBACK,
 )
-from .feedback import CycleMemory, FeedbackBarrier, debounce_binary_source
+from .feedback import (
+    CycleMemory,
+    FeedbackBarrier,
+    append_bounded_event,
+    debounce_binary_source,
+)
 from .models import LoadConfig, SolarSpenderConfig
 
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE}
@@ -739,8 +744,11 @@ class SolarSpenderController:
         self._record(reason)
 
     def _record(self, message: str) -> None:
-        self._event_history.append({"at": datetime.now().astimezone().isoformat(), "message": message})
-        self._event_history = self._event_history[-30:]
+        self._event_history = append_bounded_event(
+            self._event_history,
+            message=message,
+            at=datetime.now().astimezone(),
+        )
 
     def status(self) -> dict[str, Any]:
         """Return a frontend-safe controller snapshot."""
