@@ -10,6 +10,11 @@ loads Solar Spender has activated are automatically released.
 Solar Spender requires Home Assistant 2025.5 or newer for fresh same-value
 sensor-report tracking.
 
+The integration creates a Solar Spender device with an Automation switch and
+number entities for its global confirmation timing. These controls can be used
+from dashboards and automations; source wiring and AC profiles remain in the
+sidebar panel.
+
 ## Development
 
 Build the bundled Bootstrap panel after changing frontend source:
@@ -42,12 +47,15 @@ valid source and load options are saved and automation is enabled.
 - Binary sources have independently configurable continuous-on and
   continuous-off debounce durations; a bounce resets the deadline.
 - Each climate load has independent minimum-on and minimum-off durations.
-- Solar Spender starts one load, confirms it, and then waits for every relevant
-  source to produce a fresh report after the configured settling floor.
+- Solar Spender changes one load at a time and confirms the result from a
+  configurable majority of fresh, spaced source reports.
 - Cached inverter values never authorize another activation. Same-value reports
   are tracked through Home Assistant's filtered `state_reported` event.
 - A load rejected by fresh feedback is released safely and blocked until that
   solar opportunity genuinely ends.
+- Supported and failed AC combinations form a temporary capacity range for the
+  current solar opportunity. Stable marginal-draw observations are retained as
+  conservative, expiring ranking hints.
 - An AC already on is not adopted or released.
 - A manual mode or setpoint change relinquishes Solar Spender ownership.
 - Curtailed-production probes require a configured full-and-idle battery gate.

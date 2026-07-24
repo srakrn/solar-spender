@@ -1,6 +1,6 @@
 # Solar Spender — Product and Implementation Plan
 
-Status: design baseline  
+Status: sampled-feedback baseline implemented
 Initial scope: Home Assistant custom integration with a sidebar panel and
 `climate` loads
 
@@ -86,6 +86,20 @@ Activation is staged:
 5. retain or release it from fresh feedback;
 6. re-rank before considering another AC.
 
+Every activation and release uses a configurable majority confirmation window.
+The default is three fresh source snapshots at least five minutes apart, after a
+five-minute first-check delay. Activation also waits for that load's minimum-on
+deadline. A successful confirmation is followed by a five-minute pause before
+another AC may change. Each vote requires every configured feedback entity to
+report after its sampling boundary; cached readings never vote.
+
+The current solar opportunity remembers supported and unsupported AC
+combinations. A failed combination is blocked until the opportunity ends, while
+the same AC may still be tried in a smaller combination. A larger failed
+combination provides a temporary upper bound when every involved AC has an
+expected-draw estimate. These bounds reset when fresh feedback shows no surplus
+and no load remains owned.
+
 Five ACs have only 32 possible on/off combinations, but available PV and
 inverter-AC draw both vary. The initial controller therefore uses a greedy
 feedback loop. Subset optimization becomes useful only after available power and
@@ -116,9 +130,17 @@ and prevent unnecessary dehumidification.
 | Enabled | `false` after first setup | Prevent surprise activation |
 | Feedback strategy | observable surplus | Or explicit curtailed probing |
 | Export reserve | 0 W | Grid-flow/observable-surplus modes |
-| Measurement settling | 2 min | Re-evaluate after one load changes |
+| First check delay | 5 min | Earliest report eligible after a load changes |
+| Confirmation checks | 3 | Strict majority of fresh reports |
+| Time between checks | 5 min | Minimum spacing; stale values never vote |
+| Wait before next AC | 5 min | Quiet period after successful confirmation |
 
 Defaults are provisional and must be presented for user confirmation.
+
+The runtime timing controls are also exposed under one Solar Spender device as
+Home Assistant entities: an Automation switch and number entities for first
+check delay, confirmation checks, check spacing, and the delay before the next
+AC. Source wiring and per-AC profiles remain panel configuration.
 
 ### Source: binary mode
 
@@ -303,10 +325,11 @@ Clarifications:
 - Binary sources use independent continuous-on and continuous-off debounce
   deadlines. A pending binary transition blocks further load changes; a bounce
   restarts the applicable deadline.
-- A settling timer never authorizes another load change by itself. After every
-  activation or release, each configured source and battery-feedback entity
-  must produce a new Home Assistant report after the settling floor. Unchanged
-  values count only through Home Assistant's filtered `state_reported` event.
+- A timer never authorizes another load change by itself. After every activation
+  or release, each configured source and battery-feedback entity must produce a
+  new Home Assistant report after each sampling boundary. The strict majority
+  of the configured checks decides the result. Unchanged values count only
+  through Home Assistant's filtered `state_reported` event.
 - If fresh post-activation feedback loses surplus, release the just-added load
   and block that load for the rest of the current opportunity. Removing it and
   seeing the same binary headroom signal return does not re-arm it. Clear the

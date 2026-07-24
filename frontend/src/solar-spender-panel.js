@@ -24,7 +24,10 @@ const DEFAULT_OPTIONS = {
   entry_threshold_w: 300,
   exit_threshold_w: 100,
   export_reserve_w: 0,
-  settling_seconds: 120,
+  settling_seconds: 300,
+  feedback_sample_count: 3,
+  feedback_sample_interval_minutes: 5,
+  next_load_delay_minutes: 5,
   loads: [],
   battery_policy: "disabled",
   battery_soc_entity_id: "",
@@ -34,7 +37,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.2.3";
+const PANEL_VERSION = "0.3.0";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
@@ -196,6 +199,7 @@ class SolarSpenderPanelHost extends HTMLElement {
         ${this._card("Surplus control", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
         ${this._card("Battery condition", cards.battery.value, cards.battery.detail)}
         ${this._card("Source feedback", cards.feedback.value, cards.feedback.detail)}
+        ${this._card("Learned capacity", this._learnedRange(status), "Temporary estimate for the current solar opportunity.")}
         ${this._card("Solar Spender ACs", `${status.owned_loads?.length || 0} owned`, "Only ACs started by Solar Spender can be released automatically.")}
       </div>
       <div class="row g-3">
@@ -207,8 +211,13 @@ class SolarSpenderPanelHost extends HTMLElement {
             <div class="col-12">${this._sourceConfiguration()}</div>
             <div class="col-12">${this._batteryConfiguration()}</div>
             <div class="col-12 config-section">
+              <h3 class="h6 mb-3 section-heading">Confirmation timing</h3>
               <div class="row g-3">
-                <div class="col-md-6">${this._numberField("settling_seconds", "Wait after an AC change", "After turning an AC on or off, Solar Spender ignores sensor updates for this long. It then waits for a new report before making another change.", 0, null, "seconds")}</div>
+                <div class="col-md-6">${this._numberField("settling_seconds", "First check delay", "Ignore sensor updates for this long after an AC changes. For activation, the AC's minimum-on time must also finish.", 0, null, "seconds")}</div>
+                <div class="col-md-6">${this._numberField("feedback_sample_count", "Confirmation checks", "Number of fresh checks used for the decision. A strict majority must report headroom.", 1, 9, "checks", 2)}</div>
+                <div class="col-md-6">${this._numberField("feedback_sample_interval_minutes", "Time between checks", "Minimum spacing between fresh sensor reports that may count as confirmation votes.", 1, 60, "minutes")}</div>
+                <div class="col-md-6">${this._numberField("next_load_delay_minutes", "Wait before next AC", "After confirmation succeeds, wait this long before considering another AC.", 0, 60, "minutes")}</div>
+                <div class="col-12"><div class="alert alert-secondary mb-0">Default cadence: first check after 5 minutes, 3 fresh checks 5 minutes apart, then wait 5 minutes before another AC.</div></div>
               </div>
             </div>
             <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">Climate loads</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender controls only ACs it started itself.</p></div>
@@ -423,9 +432,11 @@ class SolarSpenderPanelHost extends HTMLElement {
     const result = this._shadow.querySelector("#save_result");
     try {
       const options = this._collectOptions();
-      await this._hass.connection.sendMessagePromise({ type: "solar_spender/config/update", options });
+      const response = await this._hass.connection.sendMessagePromise({ type: "solar_spender/config/update", options });
       result.className = "small text-success";
-      result.textContent = "Saved. Reloading Solar Spender…";
+      result.textContent = response.reloading
+        ? "Saved. Reloading Solar Spender…"
+        : "Saved.";
       this._options = options;
       window.setTimeout(() => this._load(), 800);
     } catch (error) {
@@ -434,7 +445,7 @@ class SolarSpenderPanelHost extends HTMLElement {
     }
   }
 
-  _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, utility: 1, min_on_seconds: 900, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
+  _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, utility: 1, min_on_seconds: 300, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
   _removeLoad(index) { const options = this._collectOptions(); options.loads.splice(index, 1); this._options = options; this._render(); }
   _entityField(key, label, help) { return `${this._label(label)}<ha-selector data-key="${key}"></ha-selector>${this._help(help)}`; }
   _numberField(key, label, help, min, max, unit, step = 1) {
@@ -546,6 +557,14 @@ class SolarSpenderPanelHost extends HTMLElement {
   }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`; }
   _history(history) { return history.length ? `<ul class="list-group list-group-flush">${history.slice().reverse().map((item) => `<li class="list-group-item px-0 small"><div>${this._escape(item.message)}</div><div class="text-body-secondary">${this._escape(item.at)}</div></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No decisions yet.</p>`; }
   _watts(value) { return typeof value === "number" ? `${Math.round(value)} W` : "—"; }
+  _learnedRange(status) {
+    const lower = status.learned_range?.supported_at_least_w;
+    const upper = status.learned_range?.unsupported_at_or_above_w;
+    if (typeof lower === "number" && typeof upper === "number") return `${Math.round(lower)}–<${Math.round(upper)} W`;
+    if (typeof upper === "number") return `<${Math.round(upper)} W`;
+    if (typeof lower === "number") return `≥${Math.round(lower)} W`;
+    return "Learning";
+  }
   _surplusDetail(status) {
     if (
       typeof status.raw_source_value === "string" &&

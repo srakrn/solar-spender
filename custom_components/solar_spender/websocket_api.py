@@ -98,8 +98,13 @@ async def websocket_update_config(
     except ConfigurationError as err:
         connection.send_error(msg["id"], "invalid_config", str(err))
         return
+    controller = _controller(hass)
+    reloading = (
+        controller is None
+        or not controller.supports_runtime_config(config)
+    )
     hass.config_entries.async_update_entry(entry, options=options)
-    connection.send_result(msg["id"], {"reloading": True})
+    connection.send_result(msg["id"], {"reloading": reloading})
 
 
 def _entry(hass: HomeAssistant) -> ConfigEntry | None:

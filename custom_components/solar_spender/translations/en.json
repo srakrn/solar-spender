@@ -14,5 +14,26 @@
         "description": "Configure Solar Spender from the sidebar panel at {panel}."
       }
     }
+  },
+  "entity": {
+    "switch": {
+      "automation": {
+        "name": "Automation"
+      }
+    },
+    "number": {
+      "first_check_delay": {
+        "name": "First check delay"
+      },
+      "confirmation_checks": {
+        "name": "Confirmation checks"
+      },
+      "minutes_between_checks": {
+        "name": "Minutes between checks"
+      },
+      "wait_before_next_ac": {
+        "name": "Wait before next AC"
+      }
+    }
   }
 }

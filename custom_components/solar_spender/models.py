@@ -26,9 +26,12 @@ from .const import (
     CONF_ENTRY_THRESHOLD_W,
     CONF_EXIT_THRESHOLD_W,
     CONF_EXPORT_RESERVE_W,
+    CONF_FEEDBACK_SAMPLE_COUNT,
+    CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES,
     CONF_GRID_ENTITY_ID,
     CONF_GRID_EXPORT_POSITIVE,
     CONF_LOADS,
+    CONF_NEXT_LOAD_DELAY_MINUTES,
     CONF_PRODUCTION_ENTITY_ID,
     CONF_SETTLING_SECONDS,
     CONF_SOURCE_TYPE,
@@ -74,7 +77,7 @@ class LoadConfig:
             expected_power_w = float(expected_power_w)
             if expected_power_w <= 0:
                 raise ConfigurationError("expected_power_w must be greater than zero")
-        min_on_seconds = int(value.get("min_on_seconds", 900))
+        min_on_seconds = int(value.get("min_on_seconds", 300))
         min_off_seconds = int(value.get("min_off_seconds", 900))
         if min_on_seconds < 0 or min_off_seconds < 0:
             raise ConfigurationError("minimum on/off durations must not be negative")
@@ -109,6 +112,9 @@ class SolarSpenderConfig:
     exit_threshold_w: float
     export_reserve_w: float
     settling_seconds: int
+    feedback_sample_count: int
+    feedback_sample_interval_minutes: float
+    next_load_delay_minutes: float
     loads: tuple[LoadConfig, ...]
     battery_policy: str
     battery_soc_entity_id: str
@@ -133,6 +139,23 @@ class SolarSpenderConfig:
         settling = int(merged[CONF_SETTLING_SECONDS])
         if settling < 0:
             raise ConfigurationError("settling_seconds must not be negative")
+        sample_count = int(merged[CONF_FEEDBACK_SAMPLE_COUNT])
+        if sample_count < 1 or sample_count > 9 or sample_count % 2 == 0:
+            raise ConfigurationError(
+                "feedback_sample_count must be an odd number from 1 to 9"
+            )
+        sample_interval = float(merged[CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES])
+        next_load_delay = float(merged[CONF_NEXT_LOAD_DELAY_MINUTES])
+        if (
+            not isfinite(sample_interval)
+            or sample_interval < 1
+            or not isfinite(next_load_delay)
+            or next_load_delay < 0
+        ):
+            raise ConfigurationError(
+                "feedback interval must be at least one minute and "
+                "next-load delay must not be negative"
+            )
         binary_on_delay = float(merged[CONF_BINARY_ON_DELAY_MINUTES])
         binary_off_delay = float(merged[CONF_BINARY_OFF_DELAY_MINUTES])
         if (
@@ -165,6 +188,9 @@ class SolarSpenderConfig:
             exit_threshold_w=exit_,
             export_reserve_w=float(merged[CONF_EXPORT_RESERVE_W]),
             settling_seconds=settling,
+            feedback_sample_count=sample_count,
+            feedback_sample_interval_minutes=sample_interval,
+            next_load_delay_minutes=next_load_delay,
             loads=loads,
             battery_policy=battery_policy,
             battery_soc_entity_id=str(merged[CONF_BATTERY_SOC_ENTITY_ID]),

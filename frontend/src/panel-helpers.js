@@ -91,8 +91,11 @@ export function statusPresentations(status, options) {
         }
       : status?.feedback?.waiting
         ? {
-            value: "Waiting for fresh data",
-            detail: (status.feedback.pending_entities || []).join(", "),
+            value: `Checking ${(status.feedback.votes || []).length + 1} of ${status.feedback.sample_count || 1}`,
+            detail: `Yes ${(status.feedback.votes || []).filter(Boolean).length} · No ${(status.feedback.votes || []).filter((vote) => !vote).length}`
+              + ((status.feedback.pending_entities || []).length
+                ? ` · Waiting for ${(status.feedback.pending_entities || []).join(", ")}`
+                : ""),
           }
         : {
             value: "Ready",

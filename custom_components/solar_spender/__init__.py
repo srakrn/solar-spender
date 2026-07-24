@@ -8,15 +8,20 @@ from homeassistant.components.frontend import async_register_built_in_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
     DATA_CONTROLLER,
     DATA_PANEL_REGISTERED,
+    DEFAULT_OPTIONS,
     DOMAIN,
     PANEL_COMPONENT,
     PANEL_MODULE_URL,
     PANEL_PATH,
     PANEL_URL,
+    PLATFORMS,
+    RUNTIME_OPTIONS_UPDATED,
 )
 from .controller import SolarSpenderController
 from .models import SolarSpenderConfig
@@ -44,9 +49,14 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: SolarSpenderConfigEntry) -> bool:
     """Set up Solar Spender from a config entry."""
-    controller = SolarSpenderController(hass, SolarSpenderConfig.from_options(entry.options), entry.entry_id)
+    controller = SolarSpenderController(
+        hass,
+        SolarSpenderConfig.from_options(entry.options),
+        entry.entry_id,
+    )
     hass.data[DOMAIN][entry.entry_id] = controller
     await controller.async_start()
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
@@ -56,12 +66,44 @@ async def async_unload_entry(hass: HomeAssistant, entry: SolarSpenderConfigEntry
     controller: SolarSpenderController | None = hass.data[DOMAIN].pop(entry.entry_id, None)
     if controller is not None:
         await controller.async_stop()
-    return True
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: SolarSpenderConfigEntry) -> None:
     """Reload safely after a validated options update."""
+    controller: SolarSpenderController | None = hass.data[DOMAIN].get(
+        entry.entry_id
+    )
+    config = SolarSpenderConfig.from_options(entry.options)
+    if controller is not None and controller.supports_runtime_config(config):
+        await controller.async_apply_runtime_config(config)
+        async_dispatcher_send(
+            hass,
+            f"{RUNTIME_OPTIONS_UPDATED}_{entry.entry_id}",
+        )
+        return
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_update_runtime_option(
+    hass: HomeAssistant,
+    entry: SolarSpenderConfigEntry,
+    key: str,
+    value: object,
+) -> None:
+    """Persist one entity-backed option without discarding controller ownership."""
+    options = {**DEFAULT_OPTIONS, **entry.options, key: value}
+    try:
+        config = SolarSpenderConfig.from_options(options)
+    except ValueError as err:
+        raise HomeAssistantError(str(err)) from err
+    controller: SolarSpenderController = hass.data[DOMAIN][entry.entry_id]
+    await controller.async_apply_runtime_config(config)
+    hass.config_entries.async_update_entry(entry, options=options)
+    async_dispatcher_send(
+        hass,
+        f"{RUNTIME_OPTIONS_UPDATED}_{entry.entry_id}",
+    )
 
 
 def _async_register_panel(hass: HomeAssistant) -> None:

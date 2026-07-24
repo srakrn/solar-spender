@@ -111,6 +111,8 @@ test("enabled status cards use readable controller state labels", () => {
       battery_allowed: false,
       feedback: {
         waiting: true,
+        votes: [true],
+        sample_count: 3,
         pending_entities: ["sensor.grid_power"],
       },
     },
@@ -119,7 +121,11 @@ test("enabled status cards use readable controller state labels", () => {
 
   assert.equal(cards.controller.value, "Waiting for feedback");
   assert.equal(cards.battery.value, "Blocking");
-  assert.equal(cards.feedback.detail, "sensor.grid_power");
+  assert.equal(cards.feedback.value, "Checking 2 of 3");
+  assert.equal(
+    cards.feedback.detail,
+    "Yes 1 · No 0 · Waiting for sensor.grid_power",
+  );
 });
 
 test("configured battery condition is inactive while Solar Spender is disabled", () => {
@@ -149,6 +155,8 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.doesNotMatch(source, /data-bs-toggle=["']tooltip["']/);
   assert.match(source, /<ha-selector data-number-key=/);
   assert.match(source, /<ha-selector data-load-select-index=/);
+  assert.match(source, /min_on_seconds: 300/);
+  assert.match(source, /feedback_sample_count: 3/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from statistics import median
 from typing import Any
 
 from homeassistant.const import (
@@ -36,11 +37,13 @@ from .const import (
 )
 from .feedback import (
     CycleMemory,
-    FeedbackBarrier,
+    FeedbackAssessment,
+    LearnedDrawEstimate,
     append_bounded_event,
     debounce_binary_source,
 )
 from .models import LoadConfig, SolarSpenderConfig
+from .storage import LearningStore
 
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE}
 
@@ -76,19 +79,22 @@ class SolarSpenderController:
         self._pending_activation: tuple[LoadConfig, dict[str, Any], dict[str, Any]] | None = None
         self._feedback_entity_ids = self._feedback_entities()
         self._feedback_reports: dict[str, datetime] = {}
-        self._feedback_barrier: FeedbackBarrier | None = None
+        self._feedback_assessment: FeedbackAssessment | None = None
         self._cycle_memory = CycleMemory()
         self._pending_unsupported_release: str | None = None
         self._binary_debounce_until: datetime | None = None
         self._binary_debounce_scheduled: Callable[[], None] | None = None
-        self._settling_until: datetime | None = None
+        self._next_load_not_before: datetime | None = None
         self._unsubscribers: list[Callable[[], None]] = []
         self._scheduled: Callable[[], None] | None = None
         self._reconciling = False
         self._event_history: list[dict[str, str]] = []
+        self._learning_store = LearningStore(hass, entry_id)
+        self._learned_draws: dict[str, LearnedDrawEstimate] = {}
 
     async def async_start(self) -> None:
         """Subscribe to all configured entities and evaluate initial state."""
+        self._learned_draws = await self._learning_store.async_load()
         entity_ids = self._watched_entities()
         for entity_id in self._feedback_entity_ids:
             if (state := self.hass.states.get(entity_id)) is not None:
@@ -118,6 +124,30 @@ class SolarSpenderController:
         if self._binary_debounce_scheduled is not None:
             self._binary_debounce_scheduled()
             self._binary_debounce_scheduled = None
+
+    async def async_apply_runtime_config(self, config: SolarSpenderConfig) -> None:
+        """Apply options exposed as entities without dropping active leases."""
+        self.config = config
+        if not config.enabled:
+            self._feedback_assessment = None
+            self._next_load_not_before = None
+            if self._scheduled is not None:
+                self._scheduled()
+                self._scheduled = None
+        await self.async_reconcile("runtime setting changed")
+
+    def supports_runtime_config(self, config: SolarSpenderConfig) -> bool:
+        """Return whether config can change without replacing subscriptions."""
+        return replace(
+            config,
+            enabled=self.config.enabled,
+            settling_seconds=self.config.settling_seconds,
+            feedback_sample_count=self.config.feedback_sample_count,
+            feedback_sample_interval_minutes=(
+                self.config.feedback_sample_interval_minutes
+            ),
+            next_load_delay_minutes=self.config.next_load_delay_minutes,
+        ) == self.config
 
     @callback
     def _async_state_changed(self, event: Event) -> None:
@@ -185,26 +215,67 @@ class SolarSpenderController:
         try:
             self._update_inputs()
             self._relinquish_manual_overrides()
-            if self._settling_until is not None and datetime.now().astimezone() < self._settling_until:
-                self.reason = "waiting for measurement settling"
-                return
-            self._settling_until = None
             self._confirm_pending_activation()
             if not self.config.enabled:
                 self._set_state(STATE_DISABLED, "disabled")
                 return
-            if self._feedback_barrier is not None and not self.source_valid:
-                self._record(
-                    "Cancelled feedback barrier because the source became invalid"
+            if self._feedback_assessment is not None and not self.source_valid:
+                assessment = self._feedback_assessment
+                self._feedback_assessment = None
+                self._record("Feedback assessment failed: source became invalid")
+                if assessment.action == "activation":
+                    self._mark_unsupported_activation(
+                        assessment.load_entity_id,
+                        global_block=True,
+                    )
+                    await self._async_shed_one(
+                        "source became invalid during confirmation",
+                        target_entity_id=assessment.load_entity_id,
+                    )
+                return
+            if (
+                self._feedback_assessment is not None
+                and self._feedback_assessment.action == "activation"
+                and self.config.source_type == SOURCE_CURTAILED
+                and not self.battery_allowed
+            ):
+                assessment = self._feedback_assessment
+                self._feedback_assessment = None
+                self._mark_unsupported_activation(
+                    assessment.load_entity_id,
+                    global_block=True,
                 )
-                self._feedback_barrier = None
-            if self._feedback_barrier is not None:
-                barrier = self._feedback_barrier
-                pending_reports = barrier.pending_entities(self._feedback_reports)
+                await self._async_shed_one(
+                    "battery did not support the probe",
+                    target_entity_id=assessment.load_entity_id,
+                )
+                return
+            if (
+                self._feedback_assessment is not None
+                and self._feedback_assessment.action == "activation"
+                and self.config.source_type == SOURCE_GRID
+                and self.headroom_w is not None
+                and self.headroom_w < 0
+            ):
+                assessment = self._feedback_assessment
+                self._feedback_assessment = None
+                self._mark_unsupported_activation(
+                    assessment.load_entity_id,
+                    global_block=True,
+                )
+                await self._async_shed_one(
+                    "grid import exceeded the configured export reserve",
+                    target_entity_id=assessment.load_entity_id,
+                )
+                return
+            if self._feedback_assessment is not None:
+                assessment = self._feedback_assessment
+                pending_reports = assessment.pending_entities(self._feedback_reports)
                 if pending_reports:
                     self._set_state(
                         STATE_WAITING_FEEDBACK,
-                        "waiting for fresh feedback: "
+                        f"confirmation {len(assessment.votes)}/"
+                        f"{assessment.sample_count}; waiting for "
                         + ", ".join(sorted(pending_reports)),
                     )
                     return
@@ -214,39 +285,60 @@ class SolarSpenderController:
                         self.reason,
                     )
                     return
-                self._feedback_barrier = None
-                self._record(
-                    f"Fresh feedback confirmed after {barrier.action} of "
-                    f"{barrier.load_entity_id}"
+                assessment.record_vote(
+                    supported=self.surplus_available,
+                    accepted_at=datetime.now().astimezone(),
+                    measurement_w=self._power_value(
+                        self.config.consumption_entity_id
+                    )
+                    if self.config.consumption_entity_id
+                    else None,
                 )
-                if barrier.action == "activation" and not self.surplus_available:
-                    self._cycle_memory.mark_unsupported(barrier.load_entity_id)
-                    self._pending_unsupported_release = barrier.load_entity_id
-                    self._record(
-                        f"Blocked {barrier.load_entity_id} for this cycle: "
-                        "fresh feedback showed no surplus"
+                self._record(
+                    f"Confirmation vote {len(assessment.votes)}/"
+                    f"{assessment.sample_count} for {assessment.load_entity_id}: "
+                    f"{'headroom' if assessment.votes[-1] else 'no headroom'}"
+                )
+                if not assessment.complete:
+                    self._schedule_reconcile(
+                        self.config.feedback_sample_interval_minutes * 60
                     )
-                    await self._async_shed_one(
-                        "activation was not supported by fresh feedback",
-                        target_entity_id=barrier.load_entity_id,
-                    )
-                    return
-                if (
-                    barrier.action == "activation"
-                    and self.config.source_type == SOURCE_CURTAILED
-                    and not self.battery_allowed
-                ):
-                    self._cycle_memory.mark_unsupported(barrier.load_entity_id)
-                    self._pending_unsupported_release = barrier.load_entity_id
-                    self._record(
-                        f"Blocked {barrier.load_entity_id} for this cycle: "
-                        "battery gate closed after activation"
-                    )
-                    await self._async_shed_one(
-                        "battery did not support the probe",
-                        target_entity_id=barrier.load_entity_id,
+                    self._set_state(
+                        STATE_WAITING_FEEDBACK,
+                        f"confirmation {len(assessment.votes)}/"
+                        f"{assessment.sample_count}",
                     )
                     return
+                self._feedback_assessment = None
+                if assessment.action == "activation":
+                    if assessment.supported:
+                        self._record_combination(True)
+                        await self._async_learn_draw(assessment)
+                else:
+                    self._record_combination(True)
+                if assessment.action == "activation" and not assessment.supported:
+                    self._mark_unsupported_activation(assessment.load_entity_id)
+                    await self._async_shed_one(
+                        "activation failed majority confirmation",
+                        target_entity_id=assessment.load_entity_id,
+                    )
+                    return
+                if not assessment.supported:
+                    self._set_state(
+                        STATE_SPENDING if self._leases else STATE_MONITORING,
+                        "majority confirmation found no headroom",
+                    )
+                    return
+                self._next_load_not_before = (
+                    datetime.now().astimezone()
+                    + timedelta(minutes=self.config.next_load_delay_minutes)
+                )
+                self._schedule_reconcile(self.config.next_load_delay_minutes * 60)
+                self._set_state(
+                    STATE_SPENDING if self._leases else STATE_MONITORING,
+                    "majority confirmation passed; waiting before next AC",
+                )
+                return
             if self._pending_unsupported_release is not None:
                 if self._pending_unsupported_release not in self._leases:
                     self._pending_unsupported_release = None
@@ -260,7 +352,7 @@ class SolarSpenderController:
                 len(self._leases),
                 self._pending_activation is not None,
                 self.surplus_available,
-                self._feedback_barrier is not None,
+                self._feedback_assessment is not None,
             ):
                 self._record("Cleared unsupported-load memory after surplus ended")
             if self._binary_debounce_until is not None:
@@ -277,10 +369,23 @@ class SolarSpenderController:
                 return
             if not self.surplus_available:
                 if self._leases:
-                    await self._async_shed_one("surplus unavailable")
+                    await self._async_shed_one(
+                        "surplus unavailable",
+                        block_for_cycle=True,
+                    )
                 else:
                     self._set_state(STATE_MONITORING, self.reason)
                 return
+            if (
+                self._next_load_not_before is not None
+                and datetime.now().astimezone() < self._next_load_not_before
+            ):
+                self._set_state(
+                    STATE_SPENDING if self._leases else STATE_MONITORING,
+                    "waiting before next AC",
+                )
+                return
+            self._next_load_not_before = None
             await self._async_activate_one(reason)
         finally:
             self._reconciling = False
@@ -404,7 +509,11 @@ class SolarSpenderController:
         if config.battery_policy == BATTERY_REQUIRE_CHARGING:
             return charging, "battery is not charging"
         if config.battery_policy == BATTERY_CHARGING_OR_SOC:
-            return charging or (soc is not None and soc >= config.battery_full_threshold), "battery gate closed"
+            return (
+                charging
+                or (soc is not None and soc >= config.battery_full_threshold),
+                "battery gate closed",
+            )
         if config.battery_policy == BATTERY_FULL_IDLE_FOR_PROBE:
             allowed = (
                 soc is not None
@@ -442,8 +551,11 @@ class SolarSpenderController:
         candidate = self._next_eligible_load()
         if candidate is None:
             no_load_reason = (
-                "remaining loads blocked for current cycle"
-                if self._cycle_memory.blocked_loads
+                "remaining loads blocked for current solar opportunity"
+                if (
+                    self._cycle_memory.blocked_loads
+                    or self._cycle_memory.unsupported_combinations
+                )
                 else "no eligible load"
             )
             self._set_state(
@@ -451,12 +563,16 @@ class SolarSpenderController:
                 no_load_reason,
             )
             return
+        effective_draw_w = self._expected_draws().get(candidate.entity_id)
         if self.config.source_type != SOURCE_CURTAILED and (
-            candidate.expected_power_w is not None
+            effective_draw_w is not None
             and self.headroom_w is not None
-            and candidate.expected_power_w > self.headroom_w
+            and effective_draw_w > self.headroom_w
         ):
-            self._set_state(STATE_SPENDING if self._leases else STATE_MONITORING, "no load fits headroom")
+            self._set_state(
+                STATE_SPENDING if self._leases else STATE_MONITORING,
+                "no load fits headroom",
+            )
             return
         self._set_state(
             STATE_PROBING if self.config.source_type == SOURCE_CURTAILED else STATE_SPENDING,
@@ -467,11 +583,19 @@ class SolarSpenderController:
     def _next_eligible_load(self) -> LoadConfig | None:
         now = datetime.now().astimezone()
         candidates: list[LoadConfig] = []
+        effective_draws = self._expected_draws()
+        owned_draw_w = self._combination_draw_w(frozenset(self._leases))
         for load in self.config.loads:
+            proposed_combination = frozenset(
+                {*self._leases, load.entity_id}
+            )
             if (
                 not load.enabled
                 or load.entity_id in self._leases
                 or load.entity_id in self._cycle_memory.blocked_loads
+                or self._cycle_memory.combination_is_blocked(
+                    proposed_combination
+                )
             ):
                 continue
             state = self.hass.states.get(load.entity_id)
@@ -480,25 +604,54 @@ class SolarSpenderController:
             last_off = self._last_off.get(load.entity_id)
             if last_off is not None and now < last_off + timedelta(seconds=load.min_off_seconds):
                 continue
+            candidate_total_w = (
+                owned_draw_w + effective_draws[load.entity_id]
+                if owned_draw_w is not None
+                and effective_draws[load.entity_id] is not None
+                else None
+            )
+            if not self._cycle_memory.fits_upper_bound(candidate_total_w):
+                continue
             candidates.append(load)
         if not candidates:
             return None
-        return min(candidates, key=lambda load: (-load.utility, load.priority, load.expected_power_w or float("inf")))
+        return min(
+            candidates,
+            key=lambda load: (
+                -load.utility,
+                load.priority,
+                effective_draws[load.entity_id] or float("inf"),
+            ),
+        )
 
     async def _async_activate_load(self, load: LoadConfig) -> None:
         previous_profile = self._capture_profile(load.entity_id)
+        baseline_consumption_w = (
+            self._power_value(self.config.consumption_entity_id)
+            if self.config.consumption_entity_id
+            else None
+        )
         profile: dict[str, Any] = {}
         await self.hass.services.async_call(
             "climate", "turn_on", {"entity_id": load.entity_id}, blocking=True
         )
         if load.hvac_mode is not None:
             await self.hass.services.async_call(
-                "climate", "set_hvac_mode", {"entity_id": load.entity_id, "hvac_mode": load.hvac_mode}, blocking=True
+                "climate",
+                "set_hvac_mode",
+                {"entity_id": load.entity_id, "hvac_mode": load.hvac_mode},
+                blocking=True,
             )
             profile["hvac_mode"] = load.hvac_mode
         if load.temperature is not None:
             await self.hass.services.async_call(
-                "climate", "set_temperature", {"entity_id": load.entity_id, ATTR_TEMPERATURE: load.temperature}, blocking=True
+                "climate",
+                "set_temperature",
+                {
+                    "entity_id": load.entity_id,
+                    ATTR_TEMPERATURE: load.temperature,
+                },
+                blocking=True,
             )
             profile[ATTR_TEMPERATURE] = load.temperature
         if load.fan_mode is not None:
@@ -511,10 +664,12 @@ class SolarSpenderController:
             profile["fan_mode"] = load.fan_mode
         self._pending_activation = (load, profile, previous_profile)
         action_completed_at = datetime.now().astimezone()
-        self._begin_feedback_barrier(
+        self._begin_feedback_assessment(
             "activation",
             load.entity_id,
             action_completed_at,
+            minimum_on_seconds=load.min_on_seconds,
+            baseline_consumption_w=baseline_consumption_w,
         )
         self._record(f"Awaiting activation confirmation for {load.entity_id}")
         self._schedule_reconcile(self.config.settling_seconds)
@@ -529,25 +684,39 @@ class SolarSpenderController:
         if state is None or state.state in _INVALID_STATES or state.state == STATE_OFF:
             self._last_off[load.entity_id] = datetime.now().astimezone()
             if (
-                self._feedback_barrier is not None
-                and self._feedback_barrier.action == "activation"
-                and self._feedback_barrier.load_entity_id == load.entity_id
+                self._feedback_assessment is not None
+                and self._feedback_assessment.action == "activation"
+                and self._feedback_assessment.load_entity_id == load.entity_id
             ):
-                self._feedback_barrier = None
+                self._feedback_assessment = None
             self._record(f"Activation was not confirmed for {load.entity_id}")
             return
+        activated_at = datetime.now().astimezone()
         self._leases[load.entity_id] = Lease(
             load,
-            datetime.now().astimezone(),
+            activated_at,
             profile,
             previous_profile,
         )
+        if (
+            self._feedback_assessment is not None
+            and self._feedback_assessment.action == "activation"
+            and self._feedback_assessment.load_entity_id == load.entity_id
+        ):
+            minimum_on_deadline = activated_at + timedelta(
+                seconds=load.min_on_seconds
+            )
+            self._feedback_assessment.next_not_before = max(
+                self._feedback_assessment.next_not_before,
+                minimum_on_deadline,
+            )
         self._record(f"Activated {load.entity_id}")
 
     async def _async_shed_one(
         self,
         reason: str,
         target_entity_id: str | None = None,
+        block_for_cycle: bool = False,
     ) -> None:
         now = datetime.now().astimezone()
         considered = list(self._leases.values())
@@ -583,6 +752,12 @@ class SolarSpenderController:
                 key=lambda item: (item.load.priority, -item.load.utility),
             )
         )
+        if block_for_cycle:
+            self._cycle_memory.record_combination(
+                frozenset(self._leases),
+                supported=False,
+                expected_draws_w=self._expected_draws(),
+            )
         self._set_state(STATE_SHEDDING, f"releasing {lease.load.entity_id}: {reason}")
         try:
             await self.hass.services.async_call(
@@ -598,32 +773,110 @@ class SolarSpenderController:
             self._pending_unsupported_release = None
         self._last_off[lease.load.entity_id] = now
         self._record(f"Released {lease.load.entity_id}: {reason}")
-        self._begin_feedback_barrier(
+        self._begin_feedback_assessment(
             "release",
             lease.load.entity_id,
             datetime.now().astimezone(),
         )
         self._schedule_reconcile(self.config.settling_seconds)
 
-    def _begin_feedback_barrier(
+    def _begin_feedback_assessment(
         self,
         action: str,
         load_entity_id: str,
         action_completed_at: datetime,
+        minimum_on_seconds: int = 0,
+        baseline_consumption_w: float | None = None,
     ) -> None:
-        """Prevent another load change until post-settling reports arrive."""
+        """Collect spaced fresh reports before permitting another load change."""
         not_before = action_completed_at + timedelta(
-            seconds=self.config.settling_seconds
+            seconds=max(self.config.settling_seconds, minimum_on_seconds)
         )
-        self._feedback_barrier = FeedbackBarrier(
+        self._feedback_assessment = FeedbackAssessment(
             action=action,
             load_entity_id=load_entity_id,
-            not_before=not_before,
+            next_not_before=not_before,
             required_entities=self._feedback_entity_ids,
+            sample_count=self.config.feedback_sample_count,
+            sample_interval=timedelta(
+                minutes=self.config.feedback_sample_interval_minutes
+            ),
+            baseline_consumption_w=baseline_consumption_w,
         )
         self._record(
-            f"Feedback barrier for {load_entity_id}; reports must be newer than "
+            f"Confirmation for {load_entity_id}; first reports must be newer than "
             f"{not_before.isoformat()}"
+        )
+
+    def _expected_draws(self) -> dict[str, float | None]:
+        now = datetime.now().astimezone()
+        return {
+            load.entity_id: (
+                self._learned_draws[load.entity_id].conservative_value(
+                    configured_w=load.expected_power_w,
+                    now=now,
+                )
+                if load.entity_id in self._learned_draws
+                else load.expected_power_w
+            )
+            for load in self.config.loads
+        }
+
+    def _combination_draw_w(self, entity_ids: frozenset[str]) -> float | None:
+        draws = self._expected_draws()
+        values = [draws.get(entity_id) for entity_id in entity_ids]
+        if any(value is None for value in values):
+            return None
+        return sum(float(value) for value in values if value is not None)
+
+    def _record_combination(self, supported: bool) -> None:
+        self._cycle_memory.record_combination(
+            frozenset(self._leases),
+            supported=supported,
+            expected_draws_w=self._expected_draws(),
+        )
+
+    def _mark_unsupported_activation(
+        self,
+        entity_id: str,
+        *,
+        global_block: bool = False,
+    ) -> None:
+        self._record_combination(False)
+        if global_block:
+            self._cycle_memory.mark_unsupported(entity_id)
+        self._pending_unsupported_release = entity_id
+        self._record(
+            f"Blocked {'load' if global_block else 'combination'} "
+            f"containing {entity_id} for this solar opportunity"
+        )
+
+    async def _async_learn_draw(self, assessment: FeedbackAssessment) -> None:
+        """Persist a marginal draw only when the post-action samples are stable."""
+        baseline_w = assessment.baseline_consumption_w
+        samples = assessment.measurements_w
+        if baseline_w is None or len(samples) != assessment.sample_count:
+            return
+        post_w = float(median(samples))
+        observed_w = post_w - baseline_w
+        spread_w = max(samples) - min(samples)
+        if observed_w <= 0 or spread_w > max(100.0, observed_w * 0.2):
+            self._record(
+                f"Skipped draw learning for {assessment.load_entity_id}: "
+                "household load was not stable"
+            )
+            return
+        now = datetime.now().astimezone()
+        previous = self._learned_draws.get(assessment.load_entity_id)
+        if previous is None:
+            estimate = LearnedDrawEstimate(observed_w, 1, now)
+        else:
+            estimate = previous.update(observed_w, updated_at=now)
+        self._learned_draws[assessment.load_entity_id] = estimate
+        await self._learning_store.async_save(self._learned_draws)
+        self._record(
+            f"Learned {assessment.load_entity_id} draw near "
+            f"{round(estimate.estimate_w)} W from {estimate.samples} sample(s)"
         )
 
     def _capture_profile(self, entity_id: str) -> dict[str, Any]:
@@ -679,20 +932,23 @@ class SolarSpenderController:
                     self._leases.pop(entity_id, None)
                     self._record(f"Relinquished {entity_id}: temperature changed")
                     continue
-            if lease.load.fan_mode is not None and state.attributes.get("fan_mode") != lease.load.fan_mode:
+            if (
+                lease.load.fan_mode is not None
+                and state.attributes.get("fan_mode") != lease.load.fan_mode
+            ):
                 self._leases.pop(entity_id, None)
                 self._record(f"Relinquished {entity_id}: fan mode changed")
         if (
-            self._feedback_barrier is not None
-            and self._feedback_barrier.action == "activation"
-            and self._feedback_barrier.load_entity_id not in self._leases
+            self._feedback_assessment is not None
+            and self._feedback_assessment.action == "activation"
+            and self._feedback_assessment.load_entity_id not in self._leases
             and self._pending_activation is None
         ):
             self._record(
-                f"Cancelled feedback barrier for "
-                f"{self._feedback_barrier.load_entity_id}: no longer owned"
+                f"Cancelled confirmation for "
+                f"{self._feedback_assessment.load_entity_id}: no longer owned"
             )
-            self._feedback_barrier = None
+            self._feedback_assessment = None
         if (
             self._pending_unsupported_release is not None
             and self._pending_unsupported_release not in self._leases
@@ -729,14 +985,16 @@ class SolarSpenderController:
     def _schedule_reconcile(self, seconds: float) -> None:
         if self._scheduled is not None:
             self._scheduled()
-        self._settling_until = datetime.now().astimezone() + timedelta(seconds=seconds)
-        self._scheduled = async_call_later(self.hass, seconds, self._async_scheduled_reconcile)
+        self._scheduled = async_call_later(
+            self.hass,
+            seconds,
+            self._async_scheduled_reconcile,
+        )
 
     @callback
     def _async_scheduled_reconcile(self, _now: datetime) -> None:
         self._scheduled = None
-        self._settling_until = None
-        self.hass.async_create_task(self.async_reconcile("settling complete"))
+        self.hass.async_create_task(self.async_reconcile("scheduled check"))
 
     def _set_state(self, state: str, reason: str) -> None:
         self.state = state
@@ -752,10 +1010,10 @@ class SolarSpenderController:
 
     def status(self) -> dict[str, Any]:
         """Return a frontend-safe controller snapshot."""
-        feedback_barrier = self._feedback_barrier
+        feedback_assessment = self._feedback_assessment
         pending_feedback = (
-            feedback_barrier.pending_entities(self._feedback_reports)
-            if feedback_barrier is not None
+            feedback_assessment.pending_entities(self._feedback_reports)
+            if feedback_assessment is not None
             else frozenset()
         )
         return {
@@ -779,16 +1037,25 @@ class SolarSpenderController:
             if self._pending_activation is not None
             else None,
             "feedback": {
-                "waiting": feedback_barrier is not None,
-                "action": feedback_barrier.action
-                if feedback_barrier is not None
+                "waiting": feedback_assessment is not None,
+                "action": feedback_assessment.action
+                if feedback_assessment is not None
                 else None,
-                "load_entity_id": feedback_barrier.load_entity_id
-                if feedback_barrier is not None
+                "load_entity_id": feedback_assessment.load_entity_id
+                if feedback_assessment is not None
                 else None,
-                "not_before": feedback_barrier.not_before.isoformat()
-                if feedback_barrier is not None
+                "not_before": feedback_assessment.next_not_before.isoformat()
+                if feedback_assessment is not None
                 else None,
+                "votes": list(feedback_assessment.votes)
+                if feedback_assessment is not None
+                else [],
+                "sample_count": feedback_assessment.sample_count
+                if feedback_assessment is not None
+                else self.config.feedback_sample_count,
+                "required_yes_votes": feedback_assessment.required_yes_votes
+                if feedback_assessment is not None
+                else self.config.feedback_sample_count // 2 + 1,
                 "pending_entities": sorted(pending_feedback),
                 "last_reports": {
                     entity_id: reported_at.isoformat()
@@ -796,6 +1063,10 @@ class SolarSpenderController:
                 },
             },
             "blocked_loads": sorted(self._cycle_memory.blocked_loads),
+            "learned_range": {
+                "supported_at_least_w": self._cycle_memory.lower_supported_w,
+                "unsupported_at_or_above_w": self._cycle_memory.upper_unsupported_w,
+            },
             "pending_unsupported_release": self._pending_unsupported_release,
             "loads": [
                 {
@@ -804,6 +1075,17 @@ class SolarSpenderController:
                     "owned": load.entity_id in self._leases,
                     "blocked_for_cycle": (
                         load.entity_id in self._cycle_memory.blocked_loads
+                        or self._cycle_memory.combination_is_blocked(
+                            frozenset({*self._leases, load.entity_id})
+                        )
+                    ),
+                    "effective_expected_power_w": self._expected_draws().get(
+                        load.entity_id
+                    ),
+                    "learned_draw_samples": (
+                        self._learned_draws[load.entity_id].samples
+                        if load.entity_id in self._learned_draws
+                        else 0
                     ),
                     "state": self.hass.states.get(load.entity_id).state
                     if self.hass.states.get(load.entity_id)

@@ -20,27 +20,97 @@ def append_bounded_event(
     return [*history, event][-limit:]
 
 
-@dataclass(frozen=True, slots=True)
-class FeedbackBarrier:
-    """Require every feedback entity to report after an action has settled."""
+@dataclass(slots=True)
+class FeedbackAssessment:
+    """Collect spaced, fresh source votes after one controlled load change."""
 
     action: str
     load_entity_id: str
-    not_before: datetime
+    next_not_before: datetime
     required_entities: frozenset[str]
+    sample_count: int
+    sample_interval: timedelta
+    votes: list[bool] = field(default_factory=list)
+    measurements_w: list[float] = field(default_factory=list)
+    baseline_consumption_w: float | None = None
 
     def pending_entities(self, reports: dict[str, datetime]) -> frozenset[str]:
-        """Return entities which have not produced an acceptable fresh report."""
+        """Return feedback entities which have not reported for this vote."""
         return frozenset(
             entity_id
             for entity_id in self.required_entities
             if reports.get(entity_id) is None
-            or reports[entity_id] < self.not_before
+            or reports[entity_id] < self.next_not_before
         )
 
-    def is_ready(self, reports: dict[str, datetime]) -> bool:
-        """Return whether all required reports crossed this action's barrier."""
-        return not self.pending_entities(reports)
+    @property
+    def complete(self) -> bool:
+        """Return whether all configured votes have been collected."""
+        return len(self.votes) >= self.sample_count
+
+    @property
+    def required_yes_votes(self) -> int:
+        """Return the strict-majority threshold."""
+        return self.sample_count // 2 + 1
+
+    @property
+    def supported(self) -> bool:
+        """Return the final majority result."""
+        return self.complete and sum(self.votes) >= self.required_yes_votes
+
+    def record_vote(
+        self,
+        *,
+        supported: bool,
+        accepted_at: datetime,
+        measurement_w: float | None = None,
+    ) -> None:
+        """Record one fresh vote and advance the next sampling boundary."""
+        if self.complete:
+            raise RuntimeError("feedback assessment is already complete")
+        self.votes.append(supported)
+        if measurement_w is not None:
+            self.measurements_w.append(measurement_w)
+        if not self.complete:
+            self.next_not_before = accepted_at + self.sample_interval
+
+
+@dataclass(frozen=True, slots=True)
+class LearnedDrawEstimate:
+    """A decaying per-load marginal-power hint."""
+
+    estimate_w: float
+    samples: int
+    updated_at: datetime
+
+    def update(
+        self,
+        observed_w: float,
+        *,
+        updated_at: datetime,
+        alpha: float = 0.25,
+    ) -> LearnedDrawEstimate:
+        """Return an exponentially weighted update."""
+        return LearnedDrawEstimate(
+            estimate_w=(1 - alpha) * self.estimate_w + alpha * observed_w,
+            samples=self.samples + 1,
+            updated_at=updated_at,
+        )
+
+    def conservative_value(
+        self,
+        *,
+        configured_w: float | None,
+        now: datetime,
+        minimum_samples: int = 3,
+        maximum_age: timedelta = timedelta(days=30),
+    ) -> float | None:
+        """Return a usable hint only while it has enough recent evidence."""
+        if self.samples < minimum_samples or now - self.updated_at > maximum_age:
+            return configured_w
+        if configured_w is None:
+            return self.estimate_w
+        return max(configured_w, self.estimate_w)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +145,57 @@ class CycleMemory:
     """Remember loads proven unsafe until the current spending cycle ends."""
 
     blocked_loads: set[str] = field(default_factory=set)
+    supported_combinations: set[frozenset[str]] = field(default_factory=set)
+    unsupported_combinations: set[frozenset[str]] = field(default_factory=set)
+    lower_supported_w: float | None = None
+    upper_unsupported_w: float | None = None
 
     def mark_unsupported(self, entity_id: str) -> None:
         """Block an unsupported load for the remainder of this cycle."""
         self.blocked_loads.add(entity_id)
+
+    def record_combination(
+        self,
+        entity_ids: frozenset[str],
+        *,
+        supported: bool,
+        expected_draws_w: dict[str, float | None],
+    ) -> None:
+        """Remember a result and update its temporary wattage bracket."""
+        if supported:
+            self.supported_combinations.add(entity_ids)
+        else:
+            self.unsupported_combinations.add(entity_ids)
+        draws = [expected_draws_w.get(entity_id) for entity_id in entity_ids]
+        if not entity_ids or any(draw is None for draw in draws):
+            return
+        total_w = sum(float(draw) for draw in draws if draw is not None)
+        if supported:
+            if (
+                self.upper_unsupported_w is not None
+                and total_w >= self.upper_unsupported_w
+            ):
+                self.upper_unsupported_w = None
+            self.lower_supported_w = max(self.lower_supported_w or 0, total_w)
+        else:
+            if self.lower_supported_w is not None and total_w <= self.lower_supported_w:
+                self.lower_supported_w = None
+            self.upper_unsupported_w = min(
+                self.upper_unsupported_w or total_w,
+                total_w,
+            )
+
+    def fits_upper_bound(self, total_draw_w: float | None) -> bool:
+        """Return whether a candidate fits below the latest failed bound."""
+        return (
+            total_draw_w is None
+            or self.upper_unsupported_w is None
+            or total_draw_w < self.upper_unsupported_w
+        )
+
+    def combination_is_blocked(self, entity_ids: frozenset[str]) -> bool:
+        """Return whether this exact combination already failed."""
+        return entity_ids in self.unsupported_combinations
 
     def reset_if_cycle_ended(
         self,
@@ -93,8 +210,18 @@ class CycleMemory:
             or activation_pending
             or surplus_available
             or feedback_waiting
-            or not self.blocked_loads
+            or not (
+                self.blocked_loads
+                or self.supported_combinations
+                or self.unsupported_combinations
+                or self.lower_supported_w is not None
+                or self.upper_unsupported_w is not None
+            )
         ):
             return False
         self.blocked_loads.clear()
+        self.supported_combinations.clear()
+        self.unsupported_combinations.clear()
+        self.lower_supported_w = None
+        self.upper_unsupported_w = None
         return True

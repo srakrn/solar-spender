@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Final
 
-DOMAIN: Final = "solar_spender"
-PLATFORMS: Final[list[str]] = []
+from homeassistant.const import Platform
 
-PANEL_VERSION: Final = "0.2.3"
+DOMAIN: Final = "solar_spender"
+PLATFORMS: Final[list[Platform]] = [Platform.NUMBER, Platform.SWITCH]
+
+PANEL_VERSION: Final = "0.3.0"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
@@ -15,6 +17,7 @@ PANEL_PATH: Final = "solar-spender"
 
 DATA_CONTROLLER: Final = "controller"
 DATA_PANEL_REGISTERED: Final = "panel_registered"
+RUNTIME_OPTIONS_UPDATED: Final = "solar_spender_runtime_options_updated"
 
 CONF_ENABLED: Final = "enabled"
 CONF_SOURCE_TYPE: Final = "source_type"
@@ -29,6 +32,9 @@ CONF_ENTRY_THRESHOLD_W: Final = "entry_threshold_w"
 CONF_EXIT_THRESHOLD_W: Final = "exit_threshold_w"
 CONF_EXPORT_RESERVE_W: Final = "export_reserve_w"
 CONF_SETTLING_SECONDS: Final = "settling_seconds"
+CONF_FEEDBACK_SAMPLE_COUNT: Final = "feedback_sample_count"
+CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES: Final = "feedback_sample_interval_minutes"
+CONF_NEXT_LOAD_DELAY_MINUTES: Final = "next_load_delay_minutes"
 CONF_LOADS: Final = "loads"
 CONF_BATTERY_POLICY: Final = "battery_policy"
 CONF_BATTERY_SOC_ENTITY_ID: Final = "battery_soc_entity_id"
@@ -72,7 +78,10 @@ DEFAULT_OPTIONS: Final = {
     CONF_ENTRY_THRESHOLD_W: 300.0,
     CONF_EXIT_THRESHOLD_W: 100.0,
     CONF_EXPORT_RESERVE_W: 0.0,
-    CONF_SETTLING_SECONDS: 120,
+    CONF_SETTLING_SECONDS: 300,
+    CONF_FEEDBACK_SAMPLE_COUNT: 3,
+    CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES: 5.0,
+    CONF_NEXT_LOAD_DELAY_MINUTES: 5.0,
     CONF_LOADS: [],
     CONF_BATTERY_POLICY: BATTERY_DISABLED,
     CONF_BATTERY_SOC_ENTITY_ID: "",
