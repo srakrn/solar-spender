@@ -8,9 +8,20 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, State, callback
 
-from .const import DATA_CONTROLLER, DEFAULT_OPTIONS, DOMAIN
+from .const import (
+    BATTERY_CHARGING_OR_SOC,
+    BATTERY_DISABLED,
+    BATTERY_FULL_IDLE_FOR_PROBE,
+    DATA_CONTROLLER,
+    DEFAULT_OPTIONS,
+    DOMAIN,
+    SOURCE_BINARY,
+    SOURCE_CURTAILED,
+    SOURCE_GRID,
+    SOURCE_PRODUCTION,
+)
 from .controller import SolarSpenderController
 from .models import ConfigurationError, SolarSpenderConfig
 
@@ -82,6 +93,7 @@ async def websocket_update_config(
     options = {**DEFAULT_OPTIONS, **msg["options"]}
     try:
         config = SolarSpenderConfig.from_options(options)
+        _validate_configured_entities(hass, config)
         _validate_climate_capabilities(hass, config)
     except ConfigurationError as err:
         connection.send_error(msg["id"], "invalid_config", str(err))
@@ -93,6 +105,99 @@ async def websocket_update_config(
 def _entry(hass: HomeAssistant) -> ConfigEntry | None:
     entries = hass.config_entries.async_entries(DOMAIN)
     return entries[0] if entries else None
+
+
+def _validate_configured_entities(
+    hass: HomeAssistant, config: SolarSpenderConfig
+) -> None:
+    """Validate entity metadata independently of the frontend selectors."""
+    if config.source_type == SOURCE_BINARY and config.binary_entity_id:
+        state = _require_entity(hass, config.binary_entity_id)
+        if state.entity_id.split(".", 1)[0] not in {"binary_sensor", "input_boolean"}:
+            raise ConfigurationError(
+                "binary headroom must be a binary_sensor or input_boolean"
+            )
+    elif config.source_type == SOURCE_GRID and config.grid_entity_id:
+        _validate_power_entity(hass, config.grid_entity_id)
+    elif config.source_type in {SOURCE_PRODUCTION, SOURCE_CURTAILED}:
+        if config.production_entity_id:
+            _validate_power_entity(hass, config.production_entity_id)
+        if config.consumption_entity_id:
+            _validate_power_entity(hass, config.consumption_entity_id)
+
+    if config.battery_policy == BATTERY_DISABLED:
+        return
+    if config.battery_status_entity_id:
+        _validate_battery_status_entity(hass, config)
+    if (
+        config.battery_policy
+        in {BATTERY_CHARGING_OR_SOC, BATTERY_FULL_IDLE_FOR_PROBE}
+        and config.battery_soc_entity_id
+    ):
+        _validate_battery_soc_entity(hass, config.battery_soc_entity_id)
+
+
+def _require_entity(hass: HomeAssistant, entity_id: str) -> State:
+    state = hass.states.get(entity_id)
+    if state is None:
+        raise ConfigurationError(f"{entity_id} does not exist")
+    return state
+
+
+def _validate_power_entity(hass: HomeAssistant, entity_id: str) -> None:
+    state = _require_entity(hass, entity_id)
+    attributes = state.attributes
+    if (
+        not entity_id.startswith("sensor.")
+        or attributes.get("device_class") != "power"
+        or attributes.get("state_class") != "measurement"
+        or attributes.get("unit_of_measurement") not in {"W", "kW"}
+    ):
+        raise ConfigurationError(
+            f"{entity_id} must be a measurement power sensor using W or kW"
+        )
+
+
+def _validate_battery_soc_entity(hass: HomeAssistant, entity_id: str) -> None:
+    state = _require_entity(hass, entity_id)
+    attributes = state.attributes
+    if (
+        not entity_id.startswith("sensor.")
+        or attributes.get("device_class") != "battery"
+        or attributes.get("state_class") != "measurement"
+        or attributes.get("unit_of_measurement") != "%"
+    ):
+        raise ConfigurationError(
+            f"{entity_id} must be a measurement battery sensor using %"
+        )
+
+
+def _validate_battery_status_entity(
+    hass: HomeAssistant, config: SolarSpenderConfig
+) -> None:
+    state = _require_entity(hass, config.battery_status_entity_id)
+    attributes = state.attributes
+    if state.entity_id.startswith("binary_sensor."):
+        if attributes.get("device_class") != "battery_charging":
+            raise ConfigurationError(
+                f"{state.entity_id} must use the battery_charging device class"
+            )
+        return
+    known_states = {
+        *config.charging_states,
+        *config.discharging_states,
+        "idle",
+        "full",
+        "standby",
+        "not_charging",
+    }
+    options = {str(value).lower() for value in attributes.get("options", [])}
+    if not state.entity_id.startswith("sensor.") or not (
+        state.state.lower() in known_states or options.intersection(known_states)
+    ):
+        raise ConfigurationError(
+            f"{state.entity_id} must report charging, discharging, or idle status"
+        )
 
 
 def _validate_climate_capabilities(

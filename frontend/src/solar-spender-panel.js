@@ -1,5 +1,11 @@
 import bootstrapCss from "bootstrap/dist/css/bootstrap.min.css";
 import Tooltip from "bootstrap/js/dist/tooltip";
+import {
+  relevantBatterySocEntityIds,
+  relevantBatteryStatusEntityIds,
+  relevantPowerEntityIds,
+  shouldLoadPanel,
+} from "./panel-helpers.js";
 
 const DEFAULT_OPTIONS = {
   enabled: false,
@@ -22,16 +28,19 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.1.1";
+const PANEL_VERSION = "0.1.2";
 
 const ENTITY_SELECTORS = {
-  binary_entity_id: { entity: { domain: ["binary_sensor", "input_boolean"] } },
-  grid_entity_id: { entity: { domain: ["sensor"] } },
-  production_entity_id: { entity: { domain: ["sensor"] } },
-  consumption_entity_id: { entity: { domain: ["sensor"] } },
-  battery_soc_entity_id: { entity: { domain: ["sensor"] } },
-  battery_status_entity_id: { entity: { domain: ["sensor", "binary_sensor"] } },
-  load_entity_id: { entity: { domain: ["climate"] } },
+  binary_entity_id: {
+    entity: {
+      filter: [{ domain: ["binary_sensor", "input_boolean"] }],
+    },
+  },
+  load_entity_id: {
+    entity: {
+      filter: [{ domain: "climate" }],
+    },
+  },
 };
 
 /** Home Assistant's required panel-registration host; all form controls are HA selectors or Bootstrap markup. */
@@ -41,6 +50,8 @@ class SolarSpenderPanelHost extends HTMLElement {
     this._hass = null;
     this._options = { ...DEFAULT_OPTIONS };
     this._status = null;
+    this._loaded = false;
+    this._loading = false;
     this._tooltips = [];
     this._shadow = this.attachShadow({ mode: "open" });
     this._shadow.innerHTML = `<style>${bootstrapCss}</style><main class="container-fluid py-3" id="app"></main>`;
@@ -48,7 +59,10 @@ class SolarSpenderPanelHost extends HTMLElement {
 
   set hass(value) {
     this._hass = value;
-    this._load();
+    this._syncSelectorHass();
+    if (shouldLoadPanel(this._loaded, this._loading)) {
+      this._load();
+    }
   }
 
   get hass() { return this._hass; }
@@ -56,7 +70,8 @@ class SolarSpenderPanelHost extends HTMLElement {
   disconnectedCallback() { this._disposeTooltips(); }
 
   async _load() {
-    if (!this._hass?.connection) return;
+    if (!this._hass?.connection || this._loading) return;
+    this._loading = true;
     try {
       const [status, options] = await Promise.all([
         this._hass.connection.sendMessagePromise({ type: "solar_spender/status/get" }),
@@ -65,8 +80,11 @@ class SolarSpenderPanelHost extends HTMLElement {
       this._status = status;
       this._options = { ...DEFAULT_OPTIONS, ...options };
       this._error = null;
+      this._loaded = true;
     } catch (error) {
       this._error = error?.message || "Solar Spender is not configured yet.";
+    } finally {
+      this._loading = false;
     }
     this._render();
   }
@@ -132,14 +150,14 @@ class SolarSpenderPanelHost extends HTMLElement {
     this._shadow.querySelectorAll("ha-selector[data-key]").forEach((selector) => {
       const key = selector.dataset.key;
       selector.hass = this._hass;
-      selector.selector = ENTITY_SELECTORS[key];
+      selector.selector = this._entitySelector(key);
       selector.value = this._options[key] || "";
     });
     this._shadow.querySelectorAll("ha-selector[data-load-index]").forEach((selector) => {
       const index = Number(selector.dataset.loadIndex);
       const load = this._options.loads[index] || {};
       selector.hass = this._hass;
-      selector.selector = ENTITY_SELECTORS.load_entity_id;
+      selector.selector = this._entitySelector("load_entity_id");
       selector.value = load.entity_id || "";
       selector.addEventListener("value-changed", (event) => {
         const options = this._collectOptions();
@@ -148,6 +166,49 @@ class SolarSpenderPanelHost extends HTMLElement {
         this._render();
       });
     });
+  }
+
+  _syncSelectorHass() {
+    this._shadow
+      ?.querySelectorAll("ha-selector")
+      .forEach((selector) => {
+        selector.hass = this._hass;
+      });
+  }
+
+  _entitySelector(key) {
+    if (
+      key === "grid_entity_id" ||
+      key === "production_entity_id" ||
+      key === "consumption_entity_id"
+    ) {
+      return {
+        entity: {
+          include_entities: relevantPowerEntityIds(this._hass?.states),
+        },
+      };
+    }
+    if (key === "battery_soc_entity_id") {
+      return {
+        entity: {
+          include_entities: relevantBatterySocEntityIds(this._hass?.states),
+        },
+      };
+    }
+    if (key === "battery_status_entity_id") {
+      return {
+        entity: {
+          include_entities: relevantBatteryStatusEntityIds(
+            this._hass?.states,
+            [
+              ...(this._options.charging_states || []),
+              ...(this._options.discharging_states || []),
+            ],
+          ),
+        },
+      };
+    }
+    return ENTITY_SELECTORS[key];
   }
 
   _fillStandardFields() {

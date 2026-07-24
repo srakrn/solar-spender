@@ -224,6 +224,11 @@ class SolarSpenderController:
         state = self.hass.states.get(self.config.battery_status_entity_id)
         if state is None or state.state in _INVALID_STATES:
             return ""
+        if (
+            state.entity_id.startswith("binary_sensor.")
+            and state.attributes.get("device_class") == "battery_charging"
+        ):
+            return "charging" if state.state == "on" else "idle"
         return state.state.lower()
 
     def _numeric_state(self, entity_id: str) -> float | None:

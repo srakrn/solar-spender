@@ -1,9 +1,11 @@
 {
   "name": "solar-spender-panel",
   "private": true,
-  "version": "0.1.0",
+  "type": "module",
+  "version": "0.1.2",
   "scripts": {
-    "build": "esbuild src/solar-spender-panel.js --bundle --format=esm --target=es2022 --loader:.css=text --outfile=../custom_components/solar_spender/frontend/solar-spender-panel.js"
+    "build": "esbuild src/solar-spender-panel.js --bundle --format=esm --target=es2022 --loader:.css=text --outfile=../custom_components/solar_spender/frontend/solar-spender-panel.js",
+    "test": "node --test src/*.test.js"
   },
   "dependencies": {
     "bootstrap": "^5.3.8"
