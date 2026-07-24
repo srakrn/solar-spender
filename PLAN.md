@@ -202,14 +202,20 @@ Each entry contains:
 - priority and stable list order;
 - desired HVAC mode (optional);
 - desired target temperature (optional);
+- desired fan mode (optional);
 - optional expected power and utility weight;
 - minimum-on duration;
 - minimum-off duration;
 - enabled flag.
 
-At least one of HVAC mode or temperature is required. Validate the chosen mode
-against `hvac_modes`, temperature against the entity's min/max/step, and command
-support against supported features.
+At least one of HVAC mode or temperature is required. Derive mode and fan-mode
+choices from the selected entity's `hvac_modes` and `fan_modes`; validate them
+again in the backend. Constrain temperature to the entity's min/max/step and
+validate command support against supported features.
+
+A `dry` profile with no target temperature is explicitly valid: Solar Spender
+sets only the selected HVAC mode and leaves the climate entity's existing target
+temperature unchanged.
 
 ### Choosing the next AC
 
@@ -308,7 +314,8 @@ Before activation:
 6. Persist a lease only after confirmed success.
 
 An ownership lease records entity ID, command/profile fingerprint, activation
-time, last observed matching state, and controller generation. It does not grant
+time, last observed matching state, controller generation, and a pre-activation
+snapshot of the controllable fields Solar Spender changed. It does not grant
 permission to overwrite future user intent.
 
 While owned, an observed off state or a material profile change not initiated by
@@ -318,8 +325,10 @@ normal changes to `hvac_action`, current temperature, or reported humidity are
 not. The controller must not immediately reapply relinquished settings.
 
 On release, call `climate.turn_off` only if the lease is still valid and
-minimum-on time has elapsed. Confirm the resulting state, then remove the lease.
-Failures remain visible and are retried only at a bounded cadence.
+minimum-on time has elapsed. Then restore the pre-activation target temperature
+and fan mode best-effort, confirm the resulting off state, and remove the lease.
+Do not restore after a manual override or ambiguous ownership. Failures remain
+visible and are retried only at a bounded cadence.
 
 ## 6. Backend interfaces
 
@@ -494,10 +503,14 @@ The release is not acceptable until all of these are automated:
 26. An AC already on before the cycle is neither modified nor released.
 27. A manual command-field change relinquishes ownership, while a normal
     `hvac_action` change does not.
-28. Minimum-on/off deadlines survive integration reload and Home Assistant
+28. A `dry` profile without a target temperature never calls
+    `climate.set_temperature`.
+29. Automatic release restores the pre-activation temperature/fan profile;
+    manual override prevents restoration.
+30. Minimum-on/off deadlines survive integration reload and Home Assistant
     restart conservatively.
-29. Two simultaneous configuration editors cannot lose updates silently.
-30. Non-admin users cannot mutate configuration or issue control commands.
+31. Two simultaneous configuration editors cannot lose updates silently.
+32. Non-admin users cannot mutate configuration or issue control commands.
 
 ## 10. Later roadmap
 

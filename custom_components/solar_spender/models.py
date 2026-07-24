@@ -46,6 +46,7 @@ class LoadConfig:
     priority: int
     hvac_mode: str | None
     temperature: float | None
+    fan_mode: str | None
     expected_power_w: float | None
     utility: float
     min_on_seconds: int
@@ -60,6 +61,7 @@ class LoadConfig:
             raise ConfigurationError("load entity_id must use the climate domain")
         hvac_mode = value.get("hvac_mode") or None
         temperature = value.get(ATTR_TEMPERATURE)
+        fan_mode = value.get("fan_mode") or None
         if hvac_mode is None and temperature is None:
             raise ConfigurationError("each load requires hvac_mode or temperature")
         if temperature is not None:
@@ -78,6 +80,7 @@ class LoadConfig:
             priority=int(value.get("priority", 100)),
             hvac_mode=hvac_mode,
             temperature=temperature,
+            fan_mode=fan_mode,
             expected_power_w=expected_power_w,
             utility=float(value.get("utility", 1)),
             min_on_seconds=min_on_seconds,

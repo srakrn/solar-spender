@@ -59,13 +59,17 @@ frontend dependencies; never load JavaScript or CSS from a CDN at runtime.
 
 ### Frontend implementation constraint
 
-Prefer Home Assistant's built-in, public frontend interface wherever it can
-provide the needed UI. If a suitable public interface is unavailable, use
-bundled Bootstrap with plain DOM APIs. Do not invent a component library or
-custom web components, use Lit, or rely on private Home Assistant frontend
-internals. Home Assistant requires a panel registration boundary; keep it as a
-thin host that renders ordinary HTML. Bundle any Bootstrap assets; never load
-JavaScript or CSS from a CDN at runtime.
+Use Home Assistant's built-in selector/form interface for entity selection and
+standard Home Assistant configuration controls. Use bundled Bootstrap only for
+layout, status presentation, and interactions that Home Assistant does not
+provide. Do not invent a component library or custom web components, use Lit,
+or rely on private Home Assistant frontend internals. Home Assistant requires a
+panel registration boundary; keep it as a thin host that renders ordinary HTML.
+Bundle any Bootstrap assets; never load JavaScript or CSS from a CDN at runtime.
+
+Every configurable field needs concise contextual help. Every entity field must
+use a Home Assistant entity selector constrained to its valid domain(s), never a
+free-text entity ID input or JSON configuration blob.
 
 Expected layout:
 
@@ -217,6 +221,9 @@ These are safety requirements, not implementation suggestions:
 - Never turn off a load that Solar Spender does not own.
 - By default, skip an AC that was already running when activation began. Do not
   alter its mode or target temperature.
+- Before changing an eligible off AC, snapshot only the controllable fields that
+  Solar Spender will change: target temperature and fan mode. On an automatic
+  release, turn the AC off and restore that snapshot best-effort.
 - A manual user change to an owned AC relinquishes ownership when the change
   conflicts with the commanded profile or turns it off. Do not “fight” the
   user.
@@ -250,6 +257,9 @@ These are safety requirements, not implementation suggestions:
 - Disabling or unloading the integration cancels listeners and timers. Disabling
   automation must not unexpectedly turn off loads; expose a separate,
   confirmable “release owned loads” action.
+- Never restore a snapshot after ownership has been relinquished or after an
+  entity is unavailable. Restoration failure is visible in runtime status but
+  does not block release of other owned loads.
 
 Do not infer success from a service call returning. Observe the resulting entity
 state, use a bounded confirmation timeout, and report failures in runtime
@@ -297,13 +307,14 @@ Required configuration:
 - optional battery policy, SOC/status/power entities, SOC threshold, and
   normalized charging/discharging state mappings;
 - ordered AC definitions with entity ID, priority, optional HVAC mode, optional
-  target temperature, optional expected marginal power and utility weight, and
-  minimum on/off durations.
+  target temperature, optional fan mode, optional expected marginal power and
+  utility weight, and minimum on/off durations. `dry` with no temperature is a
+  valid profile.
 
-Validate entity domain, supported climate features, temperature ranges, units,
-duplicate IDs, non-negative durations, sensible threshold ordering, and at
-least one commanded field per AC. Entity selectors improve UX but never replace
-backend validation.
+Validate entity domain, supported HVAC and fan modes, temperature range/step,
+units, duplicate IDs, non-negative durations, sensible threshold ordering, and
+at least one commanded field per AC. Entity selectors improve UX but never
+replace backend validation.
 
 Do not log access tokens, full WebSocket payloads, or unrelated Home Assistant
 state. Diagnostic output should redact anything not needed to debug this
@@ -364,6 +375,8 @@ Minimum backend coverage:
 - minimum-on constrained shedding and minimum-off constrained reactivation;
 - already-running ACs are skipped and never released;
 - manual overrides relinquish ownership;
+- automatic release restores the pre-activation temperature/fan profile, while
+  a manual override prevents restoration;
 - partial service failures and confirmation timeouts;
 - curtailed-production probes that are supported, unsupported, and unobservable;
 - learned marginal-power updates that reject overlapping household load changes;

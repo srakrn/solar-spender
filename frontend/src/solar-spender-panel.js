@@ -1,4 +1,5 @@
 import bootstrapCss from "bootstrap/dist/css/bootstrap.min.css";
+import Tooltip from "bootstrap/js/dist/tooltip";
 
 const DEFAULT_OPTIONS = {
   enabled: false,
@@ -21,16 +22,24 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-/**
- * This is only Home Assistant's required panel host. Its content is ordinary
- * Bootstrap HTML; it deliberately does not define a Solar Spender component API.
- */
+const ENTITY_SELECTORS = {
+  binary_entity_id: { entity: { domain: ["binary_sensor", "input_boolean"] } },
+  grid_entity_id: { entity: { domain: ["sensor"] } },
+  production_entity_id: { entity: { domain: ["sensor"] } },
+  consumption_entity_id: { entity: { domain: ["sensor"] } },
+  battery_soc_entity_id: { entity: { domain: ["sensor"] } },
+  battery_status_entity_id: { entity: { domain: ["sensor", "binary_sensor"] } },
+  load_entity_id: { entity: { domain: ["climate"] } },
+};
+
+/** Home Assistant's required panel-registration host; all form controls are HA selectors or Bootstrap markup. */
 class SolarSpenderPanelHost extends HTMLElement {
   constructor() {
     super();
     this._hass = null;
     this._options = { ...DEFAULT_OPTIONS };
     this._status = null;
+    this._tooltips = [];
     this._shadow = this.attachShadow({ mode: "open" });
     this._shadow.innerHTML = `<style>${bootstrapCss}</style><main class="container-fluid py-3" id="app"></main>`;
   }
@@ -40,13 +49,9 @@ class SolarSpenderPanelHost extends HTMLElement {
     this._load();
   }
 
-  get hass() {
-    return this._hass;
-  }
-
-  connectedCallback() {
-    this._render();
-  }
+  get hass() { return this._hass; }
+  connectedCallback() { this._render(); }
+  disconnectedCallback() { this._disposeTooltips(); }
 
   async _load() {
     if (!this._hass?.connection) return;
@@ -67,6 +72,7 @@ class SolarSpenderPanelHost extends HTMLElement {
   _render() {
     const app = this._shadow?.querySelector("#app");
     if (!app) return;
+    this._disposeTooltips();
     if (this._error) {
       app.innerHTML = `<div class="alert alert-info"><h1 class="h4">Solar Spender</h1><p class="mb-0">${this._escape(this._error)} Add the integration from Settings → Devices & services, then return here.</p></div>`;
       return;
@@ -75,7 +81,7 @@ class SolarSpenderPanelHost extends HTMLElement {
     app.innerHTML = `
       <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
         <div><h1 class="h3 mb-1">Solar Spender</h1><p class="text-body-secondary mb-0">Use spare solar power for climate loads.</p></div>
-        <button class="btn btn-outline-primary" id="refresh">Refresh</button>
+        <button class="btn btn-outline-primary" id="refresh" type="button">Refresh</button>
       </div>
       <div class="row g-3 mb-3">
         ${this._card("Controller", status.state || "Not configured", status.reason || "")}
@@ -84,59 +90,95 @@ class SolarSpenderPanelHost extends HTMLElement {
         ${this._card("Owned ACs", String(status.owned_loads?.length || 0), "Only these can be released automatically")}
       </div>
       <div class="row g-3">
-        <section class="col-12 col-xl-7"><div class="card shadow-sm"><div class="card-body">
-          <h2 class="h5">Configuration</h2>
-          <form id="settings" class="row g-3">
-            <div class="col-md-6"><label class="form-label" for="source_type">Source</label>
-              <select class="form-select" id="source_type" name="source_type">
-                <option value="binary">Binary headroom</option><option value="grid_flow">Grid flow / export</option><option value="production_consumption">Production minus consumption</option><option value="curtailed_production">Curtailed production probe</option>
-              </select></div>
-            <div class="col-md-6"><label class="form-label" for="enabled">Automation</label>
-              <select class="form-select" id="enabled" name="enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
-            <div class="col-12"><label class="form-label" for="binary_entity_id">Binary headroom entity</label><input class="form-control" id="binary_entity_id" name="binary_entity_id" placeholder="binary_sensor.solar_headroom"></div>
-            <div class="col-md-6"><label class="form-label" for="grid_entity_id">Grid-flow entity</label><input class="form-control" id="grid_entity_id" name="grid_entity_id" placeholder="sensor.grid_power"></div>
-            <div class="col-md-6"><label class="form-label" for="export_reserve_w">Export reserve (W)</label><input class="form-control" type="number" min="0" id="export_reserve_w" name="export_reserve_w"></div>
-            <div class="col-md-6"><label class="form-label" for="grid_export_positive">Grid sensor sign</label><select class="form-select" id="grid_export_positive" name="grid_export_positive"><option value="true">Export is positive</option><option value="false">Import is positive</option></select></div>
-            <div class="col-md-6"><label class="form-label" for="production_entity_id">Production power entity</label><input class="form-control" id="production_entity_id" name="production_entity_id" placeholder="sensor.solar_power"></div>
-            <div class="col-md-6"><label class="form-label" for="consumption_entity_id">Consumption power entity</label><input class="form-control" id="consumption_entity_id" name="consumption_entity_id" placeholder="sensor.home_power"></div>
-            <div class="col-md-6"><label class="form-label" for="entry_threshold_w">Entry threshold (W)</label><input class="form-control" type="number" min="0" id="entry_threshold_w" name="entry_threshold_w"></div>
-            <div class="col-md-6"><label class="form-label" for="exit_threshold_w">Exit threshold (W)</label><input class="form-control" type="number" min="0" id="exit_threshold_w" name="exit_threshold_w"></div>
-            <div class="col-md-6"><label class="form-label" for="battery_policy">Battery policy</label><select class="form-select" id="battery_policy" name="battery_policy"><option value="disabled">Disabled</option><option value="require_charging">Require charging</option><option value="charging_or_soc">Charging or SOC threshold</option><option value="full_idle_for_probe">Full and idle for probes</option></select></div>
-            <div class="col-md-6"><label class="form-label" for="battery_full_threshold">Full/SOC threshold (%)</label><input class="form-control" type="number" min="0" max="100" id="battery_full_threshold" name="battery_full_threshold"></div>
-            <div class="col-md-6"><label class="form-label" for="battery_soc_entity_id">Battery SOC entity</label><input class="form-control" id="battery_soc_entity_id" name="battery_soc_entity_id" placeholder="sensor.battery_soc"></div>
-            <div class="col-md-6"><label class="form-label" for="battery_status_entity_id">Battery status entity</label><input class="form-control" id="battery_status_entity_id" name="battery_status_entity_id" placeholder="sensor.battery_status"></div>
-            <div class="col-12"><label class="form-label" for="loads_json">Climate loads (JSON)</label><textarea class="form-control font-monospace" rows="9" id="loads_json" aria-describedby="loads_help"></textarea><div class="form-text" id="loads_help">Each load needs entity_id plus hvac_mode or temperature. Example: [{"entity_id":"climate.bedroom","hvac_mode":"dry","min_on_seconds":900,"min_off_seconds":900}]</div></div>
+        <section class="col-12 col-xxl-8"><div class="card shadow-sm"><div class="card-body">
+          <h2 class="h5 mb-3">Configuration</h2>
+          <form id="settings" class="row g-3" novalidate>
+            <div class="col-md-6">${this._selectField("enabled", "Automation", "Solar Spender never calls a climate service while disabled.", [["true", "Enabled"], ["false", "Disabled"]])}</div>
+            <div class="col-md-6">${this._selectField("source_type", "Surplus source", "Choose the measurement strategy for this solar installation.", [["binary", "Binary headroom"], ["grid_flow", "Grid flow / export"], ["production_consumption", "Production minus consumption"], ["curtailed_production", "Curtailed-production probe"]])}</div>
+            <div class="col-12"><hr class="my-1"><h3 class="h6">Solar source</h3></div>
+            <div class="col-md-6">${this._entityField("binary_entity_id", "Headroom entity", "On means spare solar is available. Use this only for binary source mode.")}</div>
+            <div class="col-md-6">${this._entityField("grid_entity_id", "Grid-flow entity", "A power sensor that reports import/export. Required for grid-flow mode.")}</div>
+            <div class="col-md-6">${this._selectField("grid_export_positive", "Grid sensor sign", "Tell Solar Spender which sign means export so it can calculate spendable power correctly.", [["true", "Export is positive"], ["false", "Import is positive"]])}</div>
+            <div class="col-md-6">${this._numberField("export_reserve_w", "Export reserve", "Watts intentionally left available for export. Set zero to maximize self-consumption.", 0, null, "W")}</div>
+            <div class="col-md-6">${this._entityField("production_entity_id", "Production power entity", "Current solar production power. Required for production and curtailed modes.")}</div>
+            <div class="col-md-6">${this._entityField("consumption_entity_id", "Consumption power entity", "Whole-home consumption power measured at the same electrical boundary as production.")}</div>
+            <div class="col-md-6">${this._numberField("entry_threshold_w", "Entry threshold", "Surplus becomes available at or above this value. It must exceed the exit threshold.", 0, null, "W")}</div>
+            <div class="col-md-6">${this._numberField("exit_threshold_w", "Exit threshold", "Surplus remains latched until it falls to this lower value, preventing oscillation.", 0, null, "W")}</div>
+            <div class="col-12"><hr class="my-1"><h3 class="h6">Battery gate</h3></div>
+            <div class="col-md-6">${this._selectField("battery_policy", "Battery policy", "For curtailed-production mode choose Full and idle for probes.", [["disabled", "Disabled"], ["require_charging", "Require charging"], ["charging_or_soc", "Charging or SOC threshold"], ["full_idle_for_probe", "Full and idle for probes"]])}</div>
+            <div class="col-md-6">${this._numberField("battery_full_threshold", "Full/SOC threshold", "Battery percentage considered full for the selected policy.", 0, 100, "%")}</div>
+            <div class="col-md-6">${this._entityField("battery_soc_entity_id", "Battery SOC entity", "Battery state of charge as a percentage.")}</div>
+            <div class="col-md-6">${this._entityField("battery_status_entity_id", "Battery status entity", "Reports charging, idle, or discharging. Curtailed probing requires a known idle state.")}</div>
+            <div class="col-md-6">${this._numberField("settling_seconds", "Measurement settling", "Seconds to wait after an AC change before making the next decision.", 0, null, "seconds")}</div>
+            <div class="col-12"><hr class="my-1"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0">Climate loads</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender controls only ACs it started itself.</p></div>
+            <div class="col-12" id="load_rows">${this._loadRows()}</div>
             <div class="col-12 d-flex align-items-center gap-2"><button class="btn btn-primary" type="submit">Save configuration</button><span id="save_result" class="small" role="status"></span></div>
           </form>
         </div></div></section>
-        <section class="col-12 col-xl-5"><div class="card shadow-sm"><div class="card-body"><h2 class="h5">Loads</h2>${this._loads(status.loads || [])}<hr><h2 class="h5">Recent decisions</h2>${this._history(status.history || [])}</div></div></section>
+        <section class="col-12 col-xxl-4"><div class="card shadow-sm"><div class="card-body"><h2 class="h5">Loads now</h2>${this._loads(status.loads || [])}<hr><h2 class="h5">Recent decisions</h2>${this._history(status.history || [])}</div></div></section>
       </div>`;
-    this._fillForm();
+    this._hydrateHaSelectors();
+    this._fillStandardFields();
+    this._activateTooltips();
     app.querySelector("#refresh").addEventListener("click", () => this._load());
     app.querySelector("#settings").addEventListener("submit", (event) => this._save(event));
+    app.querySelector("#add_load").addEventListener("click", () => this._addLoad());
+    app.querySelectorAll("[data-remove-load]").forEach((button) => button.addEventListener("click", () => this._removeLoad(Number(button.dataset.removeLoad))));
   }
 
-  _fillForm() {
+  _hydrateHaSelectors() {
+    this._shadow.querySelectorAll("ha-selector[data-key]").forEach((selector) => {
+      const key = selector.dataset.key;
+      selector.hass = this._hass;
+      selector.selector = ENTITY_SELECTORS[key];
+      selector.value = this._options[key] || "";
+    });
+    this._shadow.querySelectorAll("ha-selector[data-load-index]").forEach((selector) => {
+      const index = Number(selector.dataset.loadIndex);
+      const load = this._options.loads[index] || {};
+      selector.hass = this._hass;
+      selector.selector = ENTITY_SELECTORS.load_entity_id;
+      selector.value = load.entity_id || "";
+      selector.addEventListener("value-changed", (event) => {
+        const options = this._collectOptions();
+        options.loads[index].entity_id = event.detail.value || "";
+        this._options = options;
+        this._render();
+      });
+    });
+  }
+
+  _fillStandardFields() {
     const form = this._shadow.querySelector("#settings");
-    for (const [key, value] of Object.entries(this._options)) {
-      const input = form.elements.namedItem(key);
-      if (input && typeof value !== "object") input.value = String(value);
-    }
-    form.elements.enabled.value = String(Boolean(this._options.enabled));
-    form.elements.loads_json.value = JSON.stringify(this._options.loads || [], null, 2);
+    ["enabled", "source_type", "grid_export_positive", "battery_policy"].forEach((key) => { form.elements[key].value = String(this._options[key]); });
+    ["export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold", "settling_seconds"].forEach((key) => { form.elements[key].value = String(this._options[key]); });
+    this._options.loads.forEach((load, index) => {
+      ["hvac_mode", "temperature", "fan_mode", "priority", "expected_power_w", "utility", "min_on_seconds", "min_off_seconds"].forEach((key) => { const element = form.elements[`load_${index}_${key}`]; if (element) element.value = load[key] ?? ""; });
+    });
+  }
+
+  _collectOptions() {
+    const form = this._shadow.querySelector("#settings");
+    const options = { ...this._options };
+    ["source_type", "battery_policy"].forEach((key) => { options[key] = form.elements[key].value; });
+    ["export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold", "settling_seconds"].forEach((key) => { options[key] = Number(form.elements[key].value); });
+    options.enabled = form.elements.enabled.value === "true";
+    options.grid_export_positive = form.elements.grid_export_positive.value === "true";
+    this._shadow.querySelectorAll("ha-selector[data-key]").forEach((selector) => { options[selector.dataset.key] = selector.value || ""; });
+    options.loads = [...this._shadow.querySelectorAll("[data-load-row]")].map((row) => {
+      const index = Number(row.dataset.loadRow);
+      const value = (key) => form.elements[`load_${index}_${key}`].value;
+      const number = (key, fallback) => value(key) === "" ? fallback : Number(value(key));
+      return { entity_id: row.querySelector("ha-selector").value || "", hvac_mode: value("hvac_mode") || null, temperature: number("temperature", null), fan_mode: value("fan_mode") || null, priority: number("priority", 100), expected_power_w: number("expected_power_w", null), utility: number("utility", 1), min_on_seconds: number("min_on_seconds", 900), min_off_seconds: number("min_off_seconds", 900), enabled: true };
+    });
+    return options;
   }
 
   async _save(event) {
     event.preventDefault();
-    const form = event.currentTarget;
     const result = this._shadow.querySelector("#save_result");
     try {
-      const options = { ...this._options };
-      for (const key of ["source_type", "binary_entity_id", "grid_entity_id", "production_entity_id", "consumption_entity_id", "battery_policy", "battery_soc_entity_id", "battery_status_entity_id"]) options[key] = form.elements[key].value.trim();
-      for (const key of ["export_reserve_w", "entry_threshold_w", "exit_threshold_w", "battery_full_threshold"]) options[key] = Number(form.elements[key].value);
-      options.enabled = form.elements.enabled.value === "true";
-      options.grid_export_positive = form.elements.grid_export_positive.value === "true";
-      options.loads = JSON.parse(form.elements.loads_json.value || "[]");
+      const options = this._collectOptions();
       await this._hass.connection.sendMessagePromise({ type: "solar_spender/config/update", options });
       result.className = "small text-success";
       result.textContent = "Saved. Reloading Solar Spender…";
@@ -148,6 +190,47 @@ class SolarSpenderPanelHost extends HTMLElement {
     }
   }
 
+  _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, utility: 1, min_on_seconds: 900, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
+  _removeLoad(index) { const options = this._collectOptions(); options.loads.splice(index, 1); this._options = options; this._render(); }
+  _entityField(key, label, help) { return `${this._label(label, help)}<ha-selector data-key="${key}"></ha-selector>`; }
+  _numberField(key, label, help, min, max, unit) { return `${this._label(label, help)}<div class="input-group"><input class="form-control" type="number" id="${key}" name="${key}" min="${min}" ${max === null ? "" : `max="${max}"`}><span class="input-group-text">${unit}</span></div>`; }
+  _selectField(key, label, help, options) { return `${this._label(label, help)}<select class="form-select" id="${key}" name="${key}">${options.map(([value, text]) => `<option value="${value}">${text}</option>`).join("")}</select>`; }
+  _label(label, help) { const id = `tip_${label.replaceAll(/[^a-z0-9]/gi, "_")}`; return `<div class="d-flex align-items-center gap-1 mb-1"><label class="form-label mb-0">${this._escape(label)}</label><button class="btn btn-sm btn-link p-0 text-decoration-none" type="button" aria-label="Help: ${this._escape(label)}" data-bs-toggle="tooltip" data-bs-title="${this._escape(help)}">?</button></div>`; }
+  _climateCapabilities(entityId) {
+    const attributes = this._hass?.states?.[entityId]?.attributes || {};
+    return {
+      hvacModes: (attributes.hvac_modes || []).filter((mode) => mode !== "off"),
+      fanModes: attributes.fan_modes || [],
+      minTemp: Number.isFinite(Number(attributes.min_temp)) ? Number(attributes.min_temp) : 16,
+      maxTemp: Number.isFinite(Number(attributes.max_temp)) ? Number(attributes.max_temp) : 32,
+      tempStep: Number.isFinite(Number(attributes.target_temp_step)) ? Number(attributes.target_temp_step) : 0.5,
+    };
+  }
+  _loadRows() {
+    if (!this._options.loads.length) return `<div class="alert alert-secondary mb-0">No ACs configured. Add an AC to enable automatic climate control.</div>`;
+    return this._options.loads.map((load, index) => {
+      const capabilities = this._climateCapabilities(load.entity_id);
+      const modes = [["", "Keep current"], ...capabilities.hvacModes.map((mode) => [mode, mode])];
+      const fanModes = [["", "Keep current"], ...capabilities.fanModes.map((mode) => [mode, mode])];
+      return `<div class="border rounded p-3 mb-3" data-load-row="${index}">
+        <div class="d-flex justify-content-between align-items-center mb-3"><div><strong>${this._escape(this._hass?.states?.[load.entity_id]?.attributes?.friendly_name || `AC ${index + 1}`)}</strong><div class="small text-body-secondary">${this._escape(load.entity_id || "Select a climate entity")}</div></div><button class="btn btn-sm btn-outline-danger" type="button" data-remove-load="${index}">Remove</button></div>
+        <div class="row g-3">
+          <div class="col-md-6">${this._label("Climate entity", "The air conditioner Solar Spender may start and later release.")}<ha-selector data-load-index="${index}"></ha-selector></div>
+          <div class="col-md-6">${this._loadSelect(index, "hvac_mode", "Desired mode", "Only modes reported by the selected climate entity are offered.", modes)}</div>
+          <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan mode", "Optional fan setting. Only fan modes reported by the selected climate entity are offered.", fanModes)}</div>
+          <div class="col-md-6">${this._loadNumber(index, "temperature", "Target temperature", `Optional target in the selected AC's ${capabilities.minTemp}–${capabilities.maxTemp} °C range.`, capabilities.minTemp, capabilities.maxTemp, "°C", capabilities.tempStep)}</div>
+          <div class="col-md-4">${this._loadNumber(index, "priority", "Priority", "Lower numbers are preferred before higher numbers.", 0, null, "")}</div>
+          <div class="col-md-4">${this._loadNumber(index, "utility", "Utility", "Higher utility wins before priority when selecting ACs.", 0, null, "")}</div>
+          <div class="col-md-4">${this._loadNumber(index, "expected_power_w", "Expected draw", "Optional conservative running-power estimate for budget-aware selection.", 0, null, "W")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "min_on_seconds", "Minimum on", "Seconds the AC must stay on before Solar Spender may release it.", 0, null, "seconds")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "min_off_seconds", "Minimum off", "Seconds Solar Spender waits before it can start this AC again.", 0, null, "seconds")}</div>
+        </div></div>`;
+    }).join("");
+  }
+  _loadNumber(index, key, label, help, min, max, unit, step = "any") { return `${this._label(label, help)}<div class="input-group"><input class="form-control" type="number" name="load_${index}_${key}" min="${min}" step="${step}" ${max === null ? "" : `max="${max}"`}><span class="input-group-text">${unit}</span></div>`; }
+  _loadSelect(index, key, label, help, options) { return `${this._label(label, help)}<select class="form-select" name="load_${index}_${key}">${options.map(([value, text]) => `<option value="${value}">${text}</option>`).join("")}</select>`; }
+  _activateTooltips() { this._tooltips = [...this._shadow.querySelectorAll('[data-bs-toggle="tooltip"]')].map((element) => new Tooltip(element)); }
+  _disposeTooltips() { this._tooltips.forEach((tooltip) => tooltip.dispose()); this._tooltips = []; }
   _card(title, value, detail) { return `<div class="col-12 col-sm-6 col-xl-3"><div class="card h-100 shadow-sm"><div class="card-body"><div class="text-body-secondary small">${this._escape(title)}</div><div class="fs-4 fw-semibold">${this._escape(value)}</div><div class="small text-body-secondary">${this._escape(detail)}</div></div></div></div>`; }
   _loads(loads) { return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => `<li class="list-group-item px-0 d-flex justify-content-between"><span>${this._escape(load.entity_id)}</span><span class="badge text-bg-${load.owned ? "success" : "secondary"}">${load.owned ? "Owned" : this._escape(load.state || "unknown")}</span></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`; }
   _history(history) { return history.length ? `<ul class="list-group list-group-flush">${history.slice().reverse().map((item) => `<li class="list-group-item px-0 small"><div>${this._escape(item.message)}</div><div class="text-body-secondary">${this._escape(item.at)}</div></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No decisions yet.</p>`; }

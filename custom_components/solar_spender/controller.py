@@ -9,6 +9,7 @@ from typing import Any
 
 from homeassistant.const import ATTR_TEMPERATURE, STATE_OFF, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 from .const import (
@@ -38,7 +39,8 @@ class Lease:
 
     load: LoadConfig
     activated_at: datetime
-    profile: dict[str, Any]
+    commanded_profile: dict[str, Any]
+    previous_profile: dict[str, Any]
 
 
 class SolarSpenderController:
@@ -57,7 +59,7 @@ class SolarSpenderController:
         self.headroom_w: float | None = None
         self._leases: dict[str, Lease] = {}
         self._last_off: dict[str, datetime] = {}
-        self._pending_activation: tuple[LoadConfig, dict[str, Any]] | None = None
+        self._pending_activation: tuple[LoadConfig, dict[str, Any], dict[str, Any]] | None = None
         self._settling_until: datetime | None = None
         self._unsubscribers: list[callback] = []
         self._scheduled: callback | None = None
@@ -271,6 +273,7 @@ class SolarSpenderController:
         return min(candidates, key=lambda load: (-load.utility, load.priority, load.expected_power_w or float("inf")))
 
     async def _async_activate_load(self, load: LoadConfig) -> None:
+        previous_profile = self._capture_profile(load.entity_id)
         profile: dict[str, Any] = {}
         await self.hass.services.async_call(
             "climate", "turn_on", {"entity_id": load.entity_id}, blocking=True
@@ -285,7 +288,15 @@ class SolarSpenderController:
                 "climate", "set_temperature", {"entity_id": load.entity_id, ATTR_TEMPERATURE: load.temperature}, blocking=True
             )
             profile[ATTR_TEMPERATURE] = load.temperature
-        self._pending_activation = (load, profile)
+        if load.fan_mode is not None:
+            await self.hass.services.async_call(
+                "climate",
+                "set_fan_mode",
+                {"entity_id": load.entity_id, "fan_mode": load.fan_mode},
+                blocking=True,
+            )
+            profile["fan_mode"] = load.fan_mode
+        self._pending_activation = (load, profile, previous_profile)
         self._record(f"Awaiting activation confirmation for {load.entity_id}")
         self._schedule_reconcile(self.config.settling_seconds)
 
@@ -293,14 +304,19 @@ class SolarSpenderController:
         """Create a lease only after Home Assistant observes a running climate entity."""
         if self._pending_activation is None:
             return
-        load, profile = self._pending_activation
+        load, profile, previous_profile = self._pending_activation
         self._pending_activation = None
         state = self.hass.states.get(load.entity_id)
         if state is None or state.state in _INVALID_STATES or state.state == STATE_OFF:
             self._last_off[load.entity_id] = datetime.now().astimezone()
             self._record(f"Activation was not confirmed for {load.entity_id}")
             return
-        self._leases[load.entity_id] = Lease(load, datetime.now().astimezone(), profile)
+        self._leases[load.entity_id] = Lease(
+            load,
+            datetime.now().astimezone(),
+            profile,
+            previous_profile,
+        )
         self._record(f"Activated {load.entity_id}")
 
     async def _async_shed_one(self, reason: str) -> None:
@@ -321,13 +337,55 @@ class SolarSpenderController:
             return
         lease = max(eligible, key=lambda item: (item.load.priority, -item.load.utility))
         self._set_state(STATE_SHEDDING, f"releasing {lease.load.entity_id}: {reason}")
-        await self.hass.services.async_call(
-            "climate", "turn_off", {"entity_id": lease.load.entity_id}, blocking=True
-        )
+        try:
+            await self.hass.services.async_call(
+                "climate", "turn_off", {"entity_id": lease.load.entity_id}, blocking=True
+            )
+        except HomeAssistantError as err:
+            self._record(f"Could not release {lease.load.entity_id}: {err}")
+            self._schedule_reconcile(self.config.settling_seconds)
+            return
+        await self._async_restore_profile(lease)
         self._leases.pop(lease.load.entity_id, None)
         self._last_off[lease.load.entity_id] = now
         self._record(f"Released {lease.load.entity_id}: {reason}")
         self._schedule_reconcile(self.config.settling_seconds)
+
+    def _capture_profile(self, entity_id: str) -> dict[str, Any]:
+        """Capture only fields Solar Spender may later change."""
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return {}
+        return {
+            "hvac_mode": state.state,
+            ATTR_TEMPERATURE: state.attributes.get(ATTR_TEMPERATURE),
+            "fan_mode": state.attributes.get("fan_mode"),
+        }
+
+    async def _async_restore_profile(self, lease: Lease) -> None:
+        """Restore the pre-activation controllable profile after automatic release."""
+        previous = lease.previous_profile
+        entity_id = lease.load.entity_id
+        try:
+            if previous.get(ATTR_TEMPERATURE) is not None:
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_temperature",
+                    {"entity_id": entity_id, ATTR_TEMPERATURE: previous[ATTR_TEMPERATURE]},
+                    blocking=True,
+                )
+            if previous.get("fan_mode") is not None:
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_fan_mode",
+                    {"entity_id": entity_id, "fan_mode": previous["fan_mode"]},
+                    blocking=True,
+                )
+            # The previous state is normally off because activation skips ACs
+            # already in use. `turn_off` above restores it without re-energizing.
+            self._record(f"Restored profile for {entity_id}")
+        except HomeAssistantError as err:
+            self._record(f"Could not fully restore profile for {entity_id}: {err}")
 
     def _relinquish_manual_overrides(self) -> None:
         for entity_id, lease in list(self._leases.items()):
@@ -345,6 +403,10 @@ class SolarSpenderController:
                 if actual is not None and abs(float(actual) - lease.load.temperature) > 0.1:
                     self._leases.pop(entity_id, None)
                     self._record(f"Relinquished {entity_id}: temperature changed")
+                    continue
+            if lease.load.fan_mode is not None and state.attributes.get("fan_mode") != lease.load.fan_mode:
+                self._leases.pop(entity_id, None)
+                self._record(f"Relinquished {entity_id}: fan mode changed")
 
     def _schedule_reconcile(self, seconds: float) -> None:
         if self._scheduled is not None:

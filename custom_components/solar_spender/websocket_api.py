@@ -81,7 +81,8 @@ async def websocket_update_config(
         return
     options = {**DEFAULT_OPTIONS, **msg["options"]}
     try:
-        SolarSpenderConfig.from_options(options)
+        config = SolarSpenderConfig.from_options(options)
+        _validate_climate_capabilities(hass, config)
     except ConfigurationError as err:
         connection.send_error(msg["id"], "invalid_config", str(err))
         return
@@ -92,3 +93,38 @@ async def websocket_update_config(
 def _entry(hass: HomeAssistant) -> ConfigEntry | None:
     entries = hass.config_entries.async_entries(DOMAIN)
     return entries[0] if entries else None
+
+
+def _validate_climate_capabilities(
+    hass: HomeAssistant, config: SolarSpenderConfig
+) -> None:
+    """Reject climate profiles which the selected entity cannot safely apply."""
+    for load in config.loads:
+        state = hass.states.get(load.entity_id)
+        if state is None:
+            raise ConfigurationError(f"{load.entity_id} does not exist")
+        hvac_modes = set(state.attributes.get("hvac_modes", []))
+        if load.hvac_mode is not None and load.hvac_mode not in hvac_modes:
+            raise ConfigurationError(
+                f"{load.entity_id} does not support HVAC mode {load.hvac_mode}"
+            )
+        if load.fan_mode is not None and load.fan_mode not in set(
+            state.attributes.get("fan_modes", [])
+        ):
+            raise ConfigurationError(
+                f"{load.entity_id} does not support fan mode {load.fan_mode}"
+            )
+        if load.temperature is not None:
+            min_temp = state.attributes.get("min_temp")
+            max_temp = state.attributes.get("max_temp")
+            if min_temp is not None and load.temperature < float(min_temp):
+                raise ConfigurationError(f"{load.entity_id} target is below its minimum")
+            if max_temp is not None and load.temperature > float(max_temp):
+                raise ConfigurationError(f"{load.entity_id} target is above its maximum")
+            step = state.attributes.get("target_temp_step")
+            if min_temp is not None and step is not None:
+                increments = (load.temperature - float(min_temp)) / float(step)
+                if abs(increments - round(increments)) > 0.000001:
+                    raise ConfigurationError(
+                        f"{load.entity_id} target does not match its temperature step"
+                    )
