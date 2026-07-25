@@ -69,6 +69,9 @@ valid source and load options are saved and automation is enabled.
   a configurable idle threshold.
 - Waste headroom is off while a configured battery is charging, discharging, or
   not yet eligible; charging the battery is useful solar consumption, not waste.
+- Confirmed battery discharge means owned AC demand is no longer free. Solar
+  Spender sheds one AC at a time, using discharge watts to size the release when
+  available. A closed battery gate cannot mask simultaneous solar-source loss.
 - Confirmed ownership leases, timing deadlines, cycle blocks, and recent
   decisions survive restart. A lease is recovered only if the AC still matches
   Solar Spender's exact commanded profile; ambiguous ACs are left untouched.

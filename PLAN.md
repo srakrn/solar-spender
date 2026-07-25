@@ -343,8 +343,10 @@ Any active state
 
 Clarifications:
 
-- A battery gate blocks new starts. If it closes while loads are owned, the
-  source still determines gradual shedding; this avoids abrupt comfort changes.
+- A battery gate blocks new starts. An idle or unknown gate closure alone does
+  not abruptly stop an established owned load, but confirmed battery discharge
+  proves the load is no longer solar-supported and starts gradual shedding.
+  Source loss always starts shedding even when the battery gate is closed.
 - Observable numeric sources use hysteresis rather than a time debounce: the
   surplus latch opens at the higher entry threshold and closes at the lower
   exit threshold. Zero-export deficit mode is inverted: its test opportunity
@@ -363,6 +365,10 @@ Clarifications:
   closes the gap with the least overshoot, or the largest contributor if no
   single AC is enough. Confirm the change and wait for fresh post-settling
   feedback before another.
+- When battery power reports discharge, include its normalized discharge watts
+  in the shortfall used for load selection. Never add battery and source
+  shortfalls blindly; use the larger observation because the electrical
+  boundaries may overlap.
 - If surplus returns while waiting for minimum-on eligibility, cancel shedding.
 - A load still inside minimum-on or minimum-off time remains ineligible and the
   controller reports its deadline.

@@ -220,6 +220,12 @@ Invalid or unavailable battery inputs fail closed for new activation. They do
 not abruptly turn off running ACs unless the configured surplus source also
 fails; shedding then follows the normal cadence.
 
+Confirmed battery discharge is different from an unavailable battery input: it
+proves current demand is no longer solar-supported. Mark an activation under
+confirmation as unsupported, or shed existing owned loads one at a time using
+the battery discharge magnitude when available. A closed battery gate must
+never prevent simultaneous source-loss shedding.
+
 ## Control invariants
 
 These are safety requirements, not implementation suggestions:

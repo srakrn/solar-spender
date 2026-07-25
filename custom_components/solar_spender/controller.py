@@ -39,6 +39,7 @@ from .const import (
     STATE_SPENDING,
     STATE_WAITING_FEEDBACK,
 )
+from .control import effective_release_shortfall_w, owned_load_shed_reason
 from .feedback import (
     CycleMemory,
     FeedbackAssessment,
@@ -276,8 +277,13 @@ class SolarSpenderController:
             if (
                 self._feedback_assessment is not None
                 and self._feedback_assessment.action == "activation"
-                and self.config.source_type == SOURCE_CURTAILED
-                and not self.battery_allowed
+                and (
+                    self.battery_direction == "discharging"
+                    or (
+                        self.config.source_type == SOURCE_CURTAILED
+                        and not self.battery_allowed
+                    )
+                )
             ):
                 assessment = self._feedback_assessment
                 self._feedback_assessment = None
@@ -286,7 +292,7 @@ class SolarSpenderController:
                     global_block=True,
                 )
                 await self._async_shed_one(
-                    "battery did not support the probe",
+                    "battery did not support the activation",
                     target_entity_id=assessment.load_entity_id,
                 )
                 return
@@ -394,20 +400,24 @@ class SolarSpenderController:
                 self._feedback_assessment is not None,
             ):
                 self._record("Cleared unsupported-load memory after surplus ended")
-            if not self.battery_allowed:
-                if self.state == STATE_PROBING:
-                    await self._async_shed_one("battery discharging during probe")
-                elif not self._leases:
-                    self._set_state(STATE_BLOCKED_BATTERY, self.reason)
+            shed_reason = owned_load_shed_reason(
+                has_owned_loads=bool(self._leases),
+                source_available=self.surplus_available,
+                battery_allowed=self.battery_allowed,
+                battery_direction=self.battery_direction,
+                probing=self.state == STATE_PROBING,
+            )
+            if shed_reason is not None:
+                await self._async_shed_one(
+                    shed_reason,
+                    block_for_cycle=True,
+                )
                 return
             if not self.surplus_available:
-                if self._leases:
-                    await self._async_shed_one(
-                        "surplus unavailable",
-                        block_for_cycle=True,
-                    )
-                else:
-                    self._set_state(STATE_MONITORING, self.reason)
+                self._set_state(STATE_MONITORING, self.reason)
+                return
+            if not self.battery_allowed:
+                self._set_state(STATE_BLOCKED_BATTERY, self.reason)
                 return
             if (
                 self._next_load_not_before is not None
@@ -896,8 +906,14 @@ class SolarSpenderController:
     def _release_shortfall_w(self) -> float:
         """Return the currently observable watts that load removal should cover."""
         if self.config.source_type == SOURCE_CURTAILED:
-            return max(0.0, self.source_deficit_w or 0.0)
-        return max(0.0, -(self.headroom_w or 0.0))
+            source_shortfall_w = max(0.0, self.source_deficit_w or 0.0)
+        else:
+            source_shortfall_w = max(0.0, -(self.headroom_w or 0.0))
+        return effective_release_shortfall_w(
+            source_shortfall_w=source_shortfall_w,
+            battery_direction=self.battery_direction,
+            charging_positive_battery_w=self.battery_power_w,
+        )
 
     def _combination_draw_w(self, entity_ids: frozenset[str]) -> float | None:
         draws = self._expected_draws()

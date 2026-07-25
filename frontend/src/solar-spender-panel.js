@@ -43,7 +43,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.6.0";
+const PANEL_VERSION = "0.6.1";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
