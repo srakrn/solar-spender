@@ -8,10 +8,27 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_config": "{error}"
+    },
     "step": {
       "init": {
         "title": "Solar Spender",
-        "description": "Open {panel} in the sidebar to change settings."
+        "description": "These timing controls are synchronized with the Solar Spender device entities and sidebar panel.",
+        "data": {
+          "settling_seconds": "Wait before first check",
+          "feedback_sample_count": "Number of checks",
+          "feedback_timeout_minutes": "Check timeout",
+          "input_max_age_minutes": "Maximum input age",
+          "next_load_delay_minutes": "Wait before next AC"
+        },
+        "data_description": {
+          "settling_seconds": "Seconds to wait after changing an AC before reports can count.",
+          "feedback_sample_count": "Distinct complete report sets required; more than half must pass.",
+          "feedback_timeout_minutes": "Fail closed if enough fresh report sets do not arrive within this time.",
+          "input_max_age_minutes": "Treat source and configured battery inputs older than this as unavailable.",
+          "next_load_delay_minutes": "Quiet period after successful checks before trying another AC."
+        }
       }
     }
   },
@@ -33,8 +50,11 @@
       "confirmation_checks": {
         "name": "Number of checks"
       },
-      "minutes_between_checks": {
-        "name": "Wait between checks"
+      "confirmation_timeout": {
+        "name": "Check timeout"
+      },
+      "maximum_input_age": {
+        "name": "Maximum input age"
       },
       "wait_before_next_ac": {
         "name": "Wait before next AC"

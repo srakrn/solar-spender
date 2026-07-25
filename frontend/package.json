@@ -2,7 +2,7 @@
   "name": "solar-spender-panel",
   "private": true,
   "type": "module",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "scripts": {
     "build": "esbuild src/solar-spender-panel.js --bundle --format=esm --target=es2022 --loader:.css=text --outfile=../custom_components/solar_spender/frontend/solar-spender-panel.js",
     "test": "node --test src/*.test.js"

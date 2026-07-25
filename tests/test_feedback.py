@@ -23,7 +23,7 @@ SPEC.loader.exec_module(FEEDBACK)
 
 
 class FeedbackAssessmentTests(unittest.TestCase):
-    """Verify spaced fresh votes produce a strict-majority decision."""
+    """Verify distinct fresh votes produce a strict-majority decision."""
 
     def test_three_fresh_votes_require_two_yes_results(self) -> None:
         now = datetime(2026, 7, 24, 12, 5, tzinfo=UTC)
@@ -31,24 +31,23 @@ class FeedbackAssessmentTests(unittest.TestCase):
             action="activation",
             load_entity_id="climate.ac_a",
             next_not_before=now,
+            deadline=now + timedelta(minutes=15),
             required_entities=frozenset({"binary_sensor.headroom"}),
             sample_count=3,
-            sample_interval=timedelta(minutes=5),
         )
 
-        assessment.record_vote(supported=True, accepted_at=now)
+        reports = {"binary_sensor.headroom": now}
+        assessment.record_vote(supported=True, reports=reports)
         self.assertFalse(assessment.complete)
-        self.assertEqual(
-            assessment.next_not_before,
-            now + timedelta(minutes=5),
-        )
+        reports["binary_sensor.headroom"] = now + timedelta(seconds=7)
         assessment.record_vote(
             supported=False,
-            accepted_at=now + timedelta(minutes=5),
+            reports=reports,
         )
+        reports["binary_sensor.headroom"] = now + timedelta(minutes=11)
         assessment.record_vote(
             supported=True,
-            accepted_at=now + timedelta(minutes=10),
+            reports=reports,
         )
 
         self.assertTrue(assessment.complete)
@@ -61,15 +60,85 @@ class FeedbackAssessmentTests(unittest.TestCase):
             action="release",
             load_entity_id="climate.ac_a",
             next_not_before=now,
+            deadline=now + timedelta(minutes=15),
             required_entities=frozenset({"sensor.grid"}),
             sample_count=3,
-            sample_interval=timedelta(minutes=5),
         )
-        assessment.record_vote(supported=True, accepted_at=now)
+        assessment.record_vote(
+            supported=True,
+            reports={"sensor.grid": now},
+        )
 
         self.assertEqual(
             assessment.pending_entities({"sensor.grid": now}),
             frozenset({"sensor.grid"}),
+        )
+
+    def test_all_entities_must_report_again_for_each_vote(self) -> None:
+        now = datetime(2026, 7, 24, 12, 5, tzinfo=UTC)
+        assessment = FEEDBACK.FeedbackAssessment(
+            action="activation",
+            load_entity_id="climate.ac_a",
+            next_not_before=now,
+            deadline=now + timedelta(minutes=15),
+            required_entities=frozenset({"sensor.solar", "sensor.home"}),
+            sample_count=3,
+        )
+        reports = {"sensor.solar": now, "sensor.home": now}
+        assessment.record_vote(supported=True, reports=reports)
+        reports["sensor.solar"] = now + timedelta(seconds=1)
+
+        self.assertEqual(
+            assessment.pending_entities(reports),
+            frozenset({"sensor.home"}),
+        )
+
+    def test_incomplete_assessment_times_out_at_deadline(self) -> None:
+        now = datetime(2026, 7, 24, 12, 5, tzinfo=UTC)
+        deadline = now + timedelta(minutes=15)
+        assessment = FEEDBACK.FeedbackAssessment(
+            action="activation",
+            load_entity_id="climate.ac_a",
+            next_not_before=now,
+            deadline=deadline,
+            required_entities=frozenset({"sensor.grid"}),
+            sample_count=3,
+        )
+
+        self.assertFalse(assessment.timed_out(deadline - timedelta(seconds=1)))
+        self.assertTrue(assessment.timed_out(deadline))
+
+
+class InputFreshnessTests(unittest.TestCase):
+    """Verify maximum-age boundaries fail closed."""
+
+    def test_report_is_fresh_through_maximum_age_boundary(self) -> None:
+        now = datetime(2026, 7, 24, 12, 15, tzinfo=UTC)
+
+        self.assertTrue(
+            FEEDBACK.input_is_fresh(
+                now - timedelta(minutes=15),
+                now=now,
+                maximum_age=timedelta(minutes=15),
+            )
+        )
+
+    def test_missing_or_old_report_is_stale(self) -> None:
+        now = datetime(2026, 7, 24, 12, 15, tzinfo=UTC)
+
+        self.assertFalse(
+            FEEDBACK.input_is_fresh(
+                None,
+                now=now,
+                maximum_age=timedelta(minutes=15),
+            )
+        )
+        self.assertFalse(
+            FEEDBACK.input_is_fresh(
+                now - timedelta(minutes=15, seconds=1),
+                now=now,
+                maximum_age=timedelta(minutes=15),
+            )
         )
 
 

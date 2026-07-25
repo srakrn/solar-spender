@@ -28,7 +28,8 @@ const DEFAULT_OPTIONS = {
   export_reserve_w: 0,
   settling_seconds: 300,
   feedback_sample_count: 3,
-  feedback_sample_interval_minutes: 5,
+  feedback_timeout_minutes: 15,
+  input_max_age_minutes: 15,
   next_load_delay_minutes: 5,
   loads: [],
   battery_policy: "disabled",
@@ -43,7 +44,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.7.0";
+const PANEL_VERSION = "0.8.0";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
@@ -231,10 +232,11 @@ class SolarSpenderPanelHost extends HTMLElement {
               <h3 class="h6 mb-3 section-heading">Check timing</h3>
               <div class="row g-3">
                 <div class="col-md-6">${this._numberField("settling_seconds", "Wait before first check", "Wait this long after changing an AC.", 0, null, "seconds")}</div>
-                <div class="col-md-6">${this._numberField("feedback_sample_count", "Number of checks", "How many checks to make. More than half must pass.", 1, 9, "checks", 2)}</div>
-                <div class="col-md-6">${this._numberField("feedback_sample_interval_minutes", "Wait between checks", "Time between each check.", 1, 60, "minutes")}</div>
+                <div class="col-md-6">${this._numberField("feedback_sample_count", "Number of checks", "How many distinct complete sensor reports to use. More than half must pass.", 1, 9, "checks", 2)}</div>
+                <div class="col-md-6">${this._numberField("feedback_timeout_minutes", "Check timeout", "Fail closed if enough fresh sensor reports do not arrive within this time.", 1, 1440, "minutes")}</div>
+                <div class="col-md-6">${this._numberField("input_max_age_minutes", "Maximum input age", "Treat older solar and configured battery readings as unavailable.", 1, 1440, "minutes")}</div>
                 <div class="col-md-6">${this._numberField("next_load_delay_minutes", "Wait before next AC", "After a pass, wait this long before trying another AC.", 0, 60, "minutes")}</div>
-                <div class="col-12"><div class="alert alert-secondary mb-0">Default: wait 5 minutes, check 3 times 5 minutes apart, then wait 5 minutes before another AC.</div></div>
+                <div class="col-12"><div class="alert alert-secondary mb-0">After the first-check wait, each new complete sensor report can count. By default, 3 checks must finish within 15 minutes. Sensor readings older than 15 minutes are unavailable.</div></div>
               </div>
             </div>
             <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">ACs</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender turns off only ACs it turned on.</p></div>
@@ -726,13 +728,20 @@ class SolarSpenderPanelHost extends HTMLElement {
     return "Not known yet";
   }
   _surplusDetail(status) {
+    const ages = Object.values(status.input_report_ages_seconds || {})
+      .filter((age) => typeof age === "number");
+    const ageDetail = ages.length
+      ? ` Oldest required reading: ${Math.max(...ages) < 60
+        ? "<1"
+        : Math.floor(Math.max(...ages) / 60)} min.`
+      : "";
     if (this._options.source_type === "curtailed_production") {
       return typeof status.opportunity_power_w === "number"
         && typeof status.source_deficit_w === "number"
-        ? `${Math.round(status.opportunity_power_w)} W solar · ${Math.round(status.source_deficit_w)} W gap · spare solar cannot be measured.`
-        : "Spare solar cannot be measured directly.";
+        ? `${Math.round(status.opportunity_power_w)} W solar · ${Math.round(status.source_deficit_w)} W gap · spare solar cannot be measured.${ageDetail}`
+        : `Spare solar cannot be measured directly.${ageDetail}`;
     }
-    return this._watts(status.headroom_w);
+    return `${this._watts(status.headroom_w)}${ageDetail}`;
   }
   _escape(value) { return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]); }
 }

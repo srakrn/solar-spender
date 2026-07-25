@@ -88,3 +88,17 @@ class ConfigurationMigrationTests(unittest.TestCase):
         self.assertEqual(migrated["minimum_production_w"], 300)
         self.assertEqual(migrated["entry_threshold_w"], 100)
         self.assertEqual(migrated["exit_threshold_w"], 300)
+
+    def test_fixed_feedback_spacing_migrates_to_timeout_and_age_limits(self) -> None:
+        migrated = MIGRATION.version_5_options(
+            {
+                "feedback_sample_interval_minutes": 5,
+                "feedback_sample_count": 3,
+                "loads": [],
+            }
+        )
+
+        self.assertNotIn("feedback_sample_interval_minutes", migrated)
+        self.assertEqual(migrated["feedback_timeout_minutes"], 15)
+        self.assertEqual(migrated["input_max_age_minutes"], 15)
+        self.assertEqual(migrated["feedback_sample_count"], 3)

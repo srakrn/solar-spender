@@ -48,6 +48,14 @@ from Settings → Devices & services, and configure it from the sidebar panel.
 The initial config entry is disabled. It will not command climate entities until
 valid source and load options are saved and automation is enabled.
 
+## Upgrading to 0.8.0
+
+Schema v5 removes the fixed “wait between checks” setting. Existing entries
+receive a 15-minute confirmation timeout and 15-minute maximum input age. The
+retired number entity is removed; the two replacement number entities and all
+other timing controls are editable from both the Solar Spender device and the
+integration's Configure dialog.
+
 ## Current safety model
 
 - Numeric sources use entry/exit hysteresis.
@@ -57,9 +65,12 @@ valid source and load options are saved and automation is enabled.
   permission to test one AC, not proof of spare capacity.
 - Each climate load has independent minimum-on and minimum-off durations.
 - Solar Spender changes one load at a time and confirms the result from a
-  configurable majority of fresh, spaced source reports.
+  configurable majority of distinct fresh source reports.
 - Cached inverter values never authorize another activation. Same-value reports
   are tracked through Home Assistant's filtered `state_reported` event.
+- Confirmation fails closed if enough reports do not arrive before its
+  configurable timeout. Source and configured battery inputs also have a
+  configurable maximum age.
 - A load rejected by fresh feedback is released safely and blocked until that
   solar opportunity genuinely ends.
 - Each AC may use a conservative watt estimate, an optional live W/kW power

@@ -47,6 +47,7 @@ from .feedback import (
     FeedbackAssessment,
     LearnedDrawEstimate,
     append_bounded_event,
+    input_is_fresh,
 )
 from .models import LoadConfig, SolarSpenderConfig
 from .selection import best_to_release_for_shortfall, first_to_activate
@@ -106,6 +107,8 @@ class SolarSpenderController:
         self._next_load_not_before: datetime | None = None
         self._unsubscribers: list[Callable[[], None]] = []
         self._scheduled: Callable[[], None] | None = None
+        self._feedback_timeout_scheduled: Callable[[], None] | None = None
+        self._input_expiry_scheduled: Callable[[], None] | None = None
         self._reconciling = False
         self._event_history: list[dict[str, str]] = []
         self._learning_store = LearningStore(hass, entry_id)
@@ -153,6 +156,7 @@ class SolarSpenderController:
                     ).total_seconds(),
                 )
             )
+        self._schedule_input_expiry()
         await self.async_reconcile("started")
 
     async def async_stop(self) -> None:
@@ -163,16 +167,29 @@ class SolarSpenderController:
         if self._scheduled is not None:
             self._scheduled()
             self._scheduled = None
+        if self._feedback_timeout_scheduled is not None:
+            self._feedback_timeout_scheduled()
+            self._feedback_timeout_scheduled = None
+        if self._input_expiry_scheduled is not None:
+            self._input_expiry_scheduled()
+            self._input_expiry_scheduled = None
         await self._runtime_store.async_save(self._runtime_payload())
 
     async def async_apply_runtime_config(self, config: SolarSpenderConfig) -> None:
         """Apply options exposed as entities without dropping active leases."""
         self.config = config
+        self._schedule_input_expiry()
+        if self._feedback_assessment is not None:
+            assessment = self._feedback_assessment
+            assessment.deadline = assessment.next_not_before + timedelta(
+                minutes=config.feedback_timeout_minutes
+            )
+            self._set_feedback_assessment(assessment)
         if not config.enabled:
             self._paused_until = None
             self._paused_feedback_assessment = None
             self._resume_requires_recovery = False
-            self._feedback_assessment = None
+            self._clear_feedback_assessment()
             self._next_load_not_before = None
             if self._scheduled is not None:
                 self._scheduled()
@@ -200,7 +217,7 @@ class SolarSpenderController:
             self._confirm_pending_activation()
             if self._feedback_assessment is not None:
                 self._paused_feedback_assessment = self._feedback_assessment
-            self._feedback_assessment = None
+            self._clear_feedback_assessment()
             self._paused_until = now + timedelta(minutes=minutes)
             self._set_state(
                 STATE_PAUSED,
@@ -223,9 +240,8 @@ class SolarSpenderController:
             enabled=self.config.enabled,
             settling_seconds=self.config.settling_seconds,
             feedback_sample_count=self.config.feedback_sample_count,
-            feedback_sample_interval_minutes=(
-                self.config.feedback_sample_interval_minutes
-            ),
+            feedback_timeout_minutes=self.config.feedback_timeout_minutes,
+            input_max_age_minutes=self.config.input_max_age_minutes,
             next_load_delay_minutes=self.config.next_load_delay_minutes,
         ) == self.config
 
@@ -235,11 +251,12 @@ class SolarSpenderController:
         if entity_id in self._feedback_entity_ids:
             new_state = event.data.get("new_state")
             reported_at = (
-                new_state.last_updated
+                new_state.last_reported
                 if new_state is not None
                 else datetime.now().astimezone()
             )
             self._feedback_reports[entity_id] = reported_at
+            self._schedule_input_expiry()
         self.hass.async_create_task(self.async_reconcile(f"state changed: {entity_id}"))
 
     @callback
@@ -251,6 +268,7 @@ class SolarSpenderController:
     def _async_state_reported(self, event: Event) -> None:
         entity_id = event.data["entity_id"]
         self._feedback_reports[entity_id] = event.data["last_reported"]
+        self._schedule_input_expiry()
         self.hass.async_create_task(self.async_reconcile(f"state reported: {entity_id}"))
 
     def _watched_entities(self) -> set[str]:
@@ -269,14 +287,21 @@ class SolarSpenderController:
 
     def _feedback_entities(self) -> frozenset[str]:
         """Return entities that must report freshly after every load change."""
+        return self._source_entities() | self._battery_entities()
+
+    def _source_entities(self) -> frozenset[str]:
+        """Return source entities whose age determines source validity."""
         config = self.config
         if config.source_type == SOURCE_GRID:
             values = {config.grid_entity_id}
         else:
-            values = {
-                config.production_entity_id,
-                config.consumption_entity_id,
-            }
+            values = {config.production_entity_id, config.consumption_entity_id}
+        return frozenset(value for value in values if value)
+
+    def _battery_entities(self) -> frozenset[str]:
+        """Return configured battery inputs that must remain fresh."""
+        config = self.config
+        values: set[str] = set()
         if config.battery_policy != BATTERY_DISABLED:
             values.add(
                 config.battery_power_entity_id
@@ -313,9 +338,15 @@ class SolarSpenderController:
             if not self.config.enabled:
                 self._set_state(STATE_DISABLED, "disabled")
                 return
+            if (
+                self._feedback_assessment is not None
+                and self._feedback_assessment.timed_out(now)
+            ):
+                await self._async_feedback_timed_out()
+                return
             if self._feedback_assessment is not None and not self.source_valid:
-                assessment = self._feedback_assessment
-                self._feedback_assessment = None
+                assessment = self._take_feedback_assessment()
+                assert assessment is not None
                 self._record("Check failed because a solar sensor became unavailable.")
                 if assessment.action == "activation":
                     self._mark_unsupported_activation(
@@ -326,9 +357,9 @@ class SolarSpenderController:
                         "a solar sensor became unavailable during the check",
                         target_entity_id=assessment.load_entity_id,
                     )
-                elif assessment.action == "recovery" and self._leases:
+                elif self._leases:
                     await self._async_shed_one(
-                        "a solar sensor was unavailable after restart"
+                        "a solar sensor became unavailable during checks"
                     )
                 return
             if (
@@ -342,8 +373,8 @@ class SolarSpenderController:
                     )
                 )
             ):
-                assessment = self._feedback_assessment
-                self._feedback_assessment = None
+                assessment = self._take_feedback_assessment()
+                assert assessment is not None
                 self._mark_unsupported_activation(
                     assessment.load_entity_id,
                     global_block=True,
@@ -360,8 +391,8 @@ class SolarSpenderController:
                 and self.headroom_w is not None
                 and self.headroom_w < 0
             ):
-                assessment = self._feedback_assessment
-                self._feedback_assessment = None
+                assessment = self._take_feedback_assessment()
+                assert assessment is not None
                 self._mark_unsupported_activation(
                     assessment.load_entity_id,
                     global_block=True,
@@ -384,7 +415,7 @@ class SolarSpenderController:
                     return
                 assessment.record_vote(
                     supported=self.surplus_available,
-                    accepted_at=datetime.now().astimezone(),
+                    reports=self._feedback_reports,
                     measurement_w=self._power_value(
                         self.config.consumption_entity_id
                     )
@@ -397,16 +428,13 @@ class SolarSpenderController:
                     f"{'pass' if assessment.votes[-1] else 'fail'}"
                 )
                 if not assessment.complete:
-                    self._schedule_reconcile(
-                        self.config.feedback_sample_interval_minutes * 60
-                    )
                     self._set_state(
                         STATE_WAITING_FEEDBACK,
                         f"check {len(assessment.votes)}/"
                         f"{assessment.sample_count}",
                     )
                     return
-                self._feedback_assessment = None
+                self._clear_feedback_assessment()
                 if assessment.action == "activation":
                     if assessment.supported:
                         self._record_combination(True)
@@ -505,8 +533,12 @@ class SolarSpenderController:
         if config.source_type == SOURCE_GRID:
             watts = self._power_value(config.grid_entity_id)
             self.raw_source_value = watts
-            if watts is None:
-                self._clear_source("grid power sensor unavailable")
+            if watts is None or not self._input_is_fresh(config.grid_entity_id):
+                self._clear_source(
+                    "grid power sensor stale"
+                    if watts is not None
+                    else "grid power sensor unavailable"
+                )
                 return
             self.source_valid = True
             export_w = watts if config.grid_export_positive else -watts
@@ -518,8 +550,17 @@ class SolarSpenderController:
             production_w = self._power_value(config.production_entity_id)
             consumption_w = self._power_value(config.consumption_entity_id)
             self.raw_source_value = production_w
-            if production_w is None or consumption_w is None:
-                self._clear_source("solar or home power sensor unavailable")
+            if (
+                production_w is None
+                or consumption_w is None
+                or not self._input_is_fresh(config.production_entity_id)
+                or not self._input_is_fresh(config.consumption_entity_id)
+            ):
+                self._clear_source(
+                    "solar or home power sensor stale"
+                    if production_w is not None and consumption_w is not None
+                    else "solar or home power sensor unavailable"
+                )
                 return
             self.source_valid = True
             decision_w = production_w - consumption_w
@@ -565,9 +606,18 @@ class SolarSpenderController:
         self.source_deficit_w = None
         self.reason = reason
 
-    def _power_value(self, entity_id: str) -> float | None:
+    def _power_value(
+        self,
+        entity_id: str,
+        *,
+        require_fresh: bool = False,
+    ) -> float | None:
         state = self.hass.states.get(entity_id)
-        if state is None or state.state in _INVALID_STATES:
+        if (
+            state is None
+            or state.state in _INVALID_STATES
+            or (require_fresh and not self._input_is_fresh(entity_id))
+        ):
             return None
         try:
             value = float(state.state)
@@ -593,7 +643,10 @@ class SolarSpenderController:
         status = self._battery_direction()
         charging = status == "charging"
         discharging = status == "discharging"
-        soc = self._numeric_state(config.battery_soc_entity_id)
+        soc = self._numeric_state(
+            config.battery_soc_entity_id,
+            require_fresh=True,
+        )
         if config.battery_policy == BATTERY_REQUIRE_CHARGING:
             return charging, "battery is not charging"
         if config.battery_policy == BATTERY_CHARGING_OR_SOC:
@@ -615,7 +668,10 @@ class SolarSpenderController:
 
     def _battery_direction(self) -> str:
         if self.config.battery_direction_source == BATTERY_DIRECTION_POWER:
-            power_w = self._power_value(self.config.battery_power_entity_id)
+            power_w = self._power_value(
+                self.config.battery_power_entity_id,
+                require_fresh=True,
+            )
             if power_w is None:
                 self.battery_direction = "unknown"
                 self.battery_power_w = None
@@ -629,7 +685,11 @@ class SolarSpenderController:
             self.battery_power_w = decision.charging_positive_w
             return decision.direction
         state = self.hass.states.get(self.config.battery_status_entity_id)
-        if state is None or state.state in _INVALID_STATES:
+        if (
+            state is None
+            or state.state in _INVALID_STATES
+            or not self._input_is_fresh(self.config.battery_status_entity_id)
+        ):
             self.battery_direction = "unknown"
             self.battery_power_w = None
             return ""
@@ -661,9 +721,18 @@ class SolarSpenderController:
             battery_direction=self.battery_direction,
         )
 
-    def _numeric_state(self, entity_id: str) -> float | None:
+    def _numeric_state(
+        self,
+        entity_id: str,
+        *,
+        require_fresh: bool = False,
+    ) -> float | None:
         state = self.hass.states.get(entity_id)
-        if state is None or state.state in _INVALID_STATES:
+        if (
+            state is None
+            or state.state in _INVALID_STATES
+            or (require_fresh and not self._input_is_fresh(entity_id))
+        ):
             return None
         try:
             value = float(state.state)
@@ -807,7 +876,7 @@ class SolarSpenderController:
                 and self._feedback_assessment.action == "activation"
                 and self._feedback_assessment.load_entity_id == load.entity_id
             ):
-                self._feedback_assessment = None
+                self._clear_feedback_assessment()
             self._record(f"{load.entity_id} did not turn on.")
             return
         activated_at = datetime.now().astimezone()
@@ -922,21 +991,62 @@ class SolarSpenderController:
         not_before = action_completed_at + timedelta(
             seconds=max(self.config.settling_seconds, minimum_on_seconds)
         )
-        self._feedback_assessment = FeedbackAssessment(
-            action=action,
-            load_entity_id=load_entity_id,
-            next_not_before=not_before,
-            required_entities=self._feedback_entity_ids,
-            sample_count=self.config.feedback_sample_count,
-            sample_interval=timedelta(
-                minutes=self.config.feedback_sample_interval_minutes
+        self._set_feedback_assessment(
+            FeedbackAssessment(
+                action=action,
+                load_entity_id=load_entity_id,
+                next_not_before=not_before,
+                deadline=not_before
+                + timedelta(minutes=self.config.feedback_timeout_minutes),
+                required_entities=self._feedback_entity_ids,
+                sample_count=self.config.feedback_sample_count,
+                baseline_consumption_w=baseline_consumption_w,
             ),
-            baseline_consumption_w=baseline_consumption_w,
         )
         self._record(
             f"Waiting to check {load_entity_id}. First sensor reports must be after "
             f"{not_before.isoformat()}"
         )
+
+    async def _async_feedback_timed_out(self) -> None:
+        """Fail closed when distinct fresh reports do not arrive in time."""
+        assessment = self._take_feedback_assessment()
+        assert assessment is not None
+        self._record(
+            f"Checks timed out for {assessment.load_entity_id} after "
+            f"{self.config.feedback_timeout_minutes:g} minutes."
+        )
+        if assessment.action == "activation":
+            self._clear_source("fresh sensor checks timed out")
+            self._mark_unsupported_activation(
+                assessment.load_entity_id,
+                global_block=True,
+            )
+            await self._async_shed_one(
+                "fresh sensor checks timed out",
+                target_entity_id=assessment.load_entity_id,
+            )
+        elif not self.source_valid and self._leases:
+            await self._async_shed_one("fresh sensor checks timed out")
+        elif not self.source_valid:
+            self._set_state(STATE_MONITORING, "fresh sensor checks timed out")
+        else:
+            now = datetime.now().astimezone()
+            self._set_feedback_assessment(
+                FeedbackAssessment(
+                    action="recovery",
+                    load_entity_id=assessment.load_entity_id,
+                    next_not_before=now,
+                    deadline=now
+                    + timedelta(minutes=self.config.feedback_timeout_minutes),
+                    required_entities=self._feedback_entity_ids,
+                    sample_count=self.config.feedback_sample_count,
+                )
+            )
+            self._set_state(
+                STATE_WAITING_FEEDBACK,
+                "checks timed out; waiting for a new fresh sequence",
+            )
 
     def _expected_draws(self) -> dict[str, float | None]:
         now = datetime.now().astimezone()
@@ -1106,7 +1216,7 @@ class SolarSpenderController:
                 f"Stopped checking {self._feedback_assessment.load_entity_id}: "
                 "it is no longer owned."
             )
-            self._feedback_assessment = None
+            self._clear_feedback_assessment()
         if (
             self._pending_unsupported_release is not None
             and self._pending_unsupported_release not in self._leases
@@ -1127,6 +1237,95 @@ class SolarSpenderController:
         self._scheduled = None
         self.hass.async_create_task(self.async_reconcile("scheduled check"))
 
+    def _set_feedback_assessment(self, assessment: FeedbackAssessment) -> None:
+        """Install an assessment and arm its independent fail-closed timeout."""
+        self._clear_feedback_assessment()
+        self._feedback_assessment = assessment
+        delay = max(
+            0,
+            (assessment.deadline - datetime.now().astimezone()).total_seconds(),
+        )
+        self._feedback_timeout_scheduled = async_call_later(
+            self.hass,
+            delay,
+            self._async_feedback_timeout,
+        )
+
+    def _clear_feedback_assessment(self) -> None:
+        """Discard the current assessment and its timeout callback."""
+        self._feedback_assessment = None
+        if self._feedback_timeout_scheduled is not None:
+            self._feedback_timeout_scheduled()
+            self._feedback_timeout_scheduled = None
+
+    def _take_feedback_assessment(self) -> FeedbackAssessment | None:
+        """Remove and return the current assessment."""
+        assessment = self._feedback_assessment
+        self._clear_feedback_assessment()
+        return assessment
+
+    @callback
+    def _async_feedback_timeout(self, _now: datetime) -> None:
+        self._feedback_timeout_scheduled = None
+        self.hass.async_create_task(self.async_reconcile("feedback timeout"))
+
+    def _input_is_fresh(
+        self,
+        entity_id: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return whether an input has reported within the configured age."""
+        reported_at = self._feedback_reports.get(entity_id)
+        if reported_at is None:
+            state = self.hass.states.get(entity_id)
+            reported_at = state.last_reported if state is not None else None
+        current = now or datetime.now().astimezone()
+        return input_is_fresh(
+            reported_at,
+            now=current,
+            maximum_age=timedelta(minutes=self.config.input_max_age_minutes),
+        )
+
+    def _stale_input_entities(
+        self,
+        now: datetime | None = None,
+    ) -> frozenset[str]:
+        """Return configured decision inputs older than the maximum age."""
+        current = now or datetime.now().astimezone()
+        return frozenset(
+            entity_id
+            for entity_id in self._feedback_entity_ids
+            if not self._input_is_fresh(entity_id, current)
+        )
+
+    def _schedule_input_expiry(self) -> None:
+        """Reconcile when the next currently fresh decision input expires."""
+        if self._input_expiry_scheduled is not None:
+            self._input_expiry_scheduled()
+            self._input_expiry_scheduled = None
+        now = datetime.now().astimezone()
+        maximum_age = timedelta(minutes=self.config.input_max_age_minutes)
+        deadlines = [
+            reported_at + maximum_age
+            for entity_id, reported_at in self._feedback_reports.items()
+            if entity_id in self._feedback_entity_ids
+            and reported_at + maximum_age > now
+        ]
+        if not deadlines:
+            return
+        delay = max(0, (min(deadlines) - now).total_seconds())
+        self._input_expiry_scheduled = async_call_later(
+            self.hass,
+            delay,
+            self._async_input_expired,
+        )
+
+    @callback
+    def _async_input_expired(self, _now: datetime) -> None:
+        self._input_expiry_scheduled = None
+        self._schedule_input_expiry()
+        self.hass.async_create_task(self.async_reconcile("input age expired"))
+
     def _pause_is_active(self, now: datetime | None = None) -> bool:
         """Return whether the persisted temporary pause is still active."""
         current = now or datetime.now().astimezone()
@@ -1135,14 +1334,16 @@ class SolarSpenderController:
     def _begin_recovery_feedback(self, label: str) -> None:
         """Require fresh post-boundary reports before changing another load."""
         now = datetime.now().astimezone()
-        self._feedback_assessment = FeedbackAssessment(
-            action="recovery",
-            load_entity_id=label,
-            next_not_before=now + timedelta(seconds=self.config.settling_seconds),
-            required_entities=self._feedback_entity_ids,
-            sample_count=self.config.feedback_sample_count,
-            sample_interval=timedelta(
-                minutes=self.config.feedback_sample_interval_minutes
+        not_before = now + timedelta(seconds=self.config.settling_seconds)
+        self._set_feedback_assessment(
+            FeedbackAssessment(
+                action="recovery",
+                load_entity_id=label,
+                next_not_before=not_before,
+                deadline=not_before
+                + timedelta(minutes=self.config.feedback_timeout_minutes),
+                required_entities=self._feedback_entity_ids,
+                sample_count=self.config.feedback_sample_count,
             ),
         )
 
@@ -1156,8 +1357,12 @@ class SolarSpenderController:
         ):
             assessment.votes.clear()
             assessment.measurements_w.clear()
+            assessment.consumed_reports.clear()
             assessment.next_not_before = now
-            self._feedback_assessment = assessment
+            assessment.deadline = now + timedelta(
+                minutes=self.config.feedback_timeout_minutes
+            )
+            self._set_feedback_assessment(assessment)
             self._record(f"{message}. Restarting the interrupted checks.")
         elif self._resume_requires_recovery and self._leases:
             self._begin_recovery_feedback("post-restart paused leases")
@@ -1419,6 +1624,7 @@ class SolarSpenderController:
 
     def status(self) -> dict[str, Any]:
         """Return a frontend-safe controller snapshot."""
+        now = datetime.now().astimezone()
         feedback_assessment = self._feedback_assessment
         pending_feedback = (
             feedback_assessment.pending_entities(self._feedback_reports)
@@ -1451,6 +1657,12 @@ class SolarSpenderController:
             "headroom_w": self.headroom_w,
             "opportunity_power_w": self.opportunity_power_w,
             "source_deficit_w": self.source_deficit_w,
+            "stale_input_entities": sorted(self._stale_input_entities(now)),
+            "input_report_ages_seconds": {
+                entity_id: max(0, (now - reported_at).total_seconds())
+                for entity_id, reported_at in self._feedback_reports.items()
+                if entity_id in self._feedback_entity_ids
+            },
             "battery_allowed": self.battery_allowed,
             "battery_direction": self.battery_direction,
             "battery_power_w": self.battery_power_w,
@@ -1472,6 +1684,9 @@ class SolarSpenderController:
                 if feedback_assessment is not None
                 else None,
                 "not_before": feedback_assessment.next_not_before.isoformat()
+                if feedback_assessment is not None
+                else None,
+                "deadline": feedback_assessment.deadline.isoformat()
                 if feedback_assessment is not None
                 else None,
                 "votes": list(feedback_assessment.votes)

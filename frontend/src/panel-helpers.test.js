@@ -186,10 +186,22 @@ test("enabled status cards use readable controller state labels", () => {
   assert.equal(cards.controller.value, "Checking");
   assert.equal(cards.battery.value, "Block");
   assert.equal(cards.feedback.value, "Checking 2 of 3");
-  assert.equal(
-    cards.feedback.detail,
-    "Pass 1 · Fail 0 · Waiting: sensor.grid_power",
+  assert.match(cards.feedback.detail, /Pass 1 · Fail 0/);
+  assert.match(cards.feedback.detail, /Waiting: sensor.grid_power/);
+});
+
+test("stale inputs are named in source status", () => {
+  const cards = statusPresentations(
+    {
+      enabled: true,
+      source_valid: false,
+      stale_input_entities: ["sensor.grid_power"],
+      feedback: { waiting: false },
+    },
+    { battery_policy: "disabled" },
   );
+
+  assert.equal(cards.surplus.detail, "Stale: sensor.grid_power");
 });
 
 test("timed pause freezes every live decision card", () => {
@@ -242,6 +254,9 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /<ha-selector data-load-select-index=/);
   assert.match(source, /min_on_seconds: 300/);
   assert.match(source, /feedback_sample_count: 3/);
+  assert.match(source, /feedback_timeout_minutes: 15/);
+  assert.match(source, /input_max_age_minutes: 15/);
+  assert.doesNotMatch(source, /feedback_sample_interval_minutes/);
   assert.doesNotMatch(source, /utility/i);
   assert.doesNotMatch(source, /Binary headroom/);
   assert.match(source, /Lower numbers start first/i);

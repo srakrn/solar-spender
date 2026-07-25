@@ -119,14 +119,18 @@ export function statusPresentations(status, options) {
       : status?.source_valid
       ? {
           value: status?.waste_headroom_available ? "Yes" : "No",
-          detail: status?.surplus_available
+          detail: (status?.stale_input_entities || []).length
+            ? `Stale: ${status.stale_input_entities.join(", ")}`
+            : status?.surplus_available
             && !status?.waste_headroom_available
             ? "The battery gets the spare solar first."
             : null,
         }
       : {
           value: "Unknown",
-          detail: "The solar sensors are missing or unavailable.",
+          detail: (status?.stale_input_entities || []).length
+            ? `Stale: ${status.stale_input_entities.join(", ")}`
+            : "The solar sensors are missing or unavailable.",
         },
     battery: !batteryConfigured
       ? {
@@ -171,6 +175,9 @@ export function statusPresentations(status, options) {
             detail: `Pass ${(status.feedback.votes || []).filter(Boolean).length} · Fail ${(status.feedback.votes || []).filter((vote) => !vote).length}`
               + ((status.feedback.pending_entities || []).length
                 ? ` · Waiting: ${(status.feedback.pending_entities || []).join(", ")}`
+                : "")
+              + (status.feedback.deadline
+                ? ` · Timeout: ${new Date(status.feedback.deadline).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
                 : ""),
           }
         : {

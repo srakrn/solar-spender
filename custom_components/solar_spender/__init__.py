@@ -9,6 +9,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
@@ -24,7 +25,7 @@ from .const import (
     RUNTIME_OPTIONS_UPDATED,
 )
 from .controller import SolarSpenderController
-from .migration import version_4_options
+from .migration import version_4_options, version_5_options
 from .models import SolarSpenderConfig
 from .websocket_api import async_register_websocket_api
 
@@ -53,11 +54,22 @@ async def async_migrate_entry(
     entry: SolarSpenderConfigEntry,
 ) -> bool:
     """Migrate saved options without changing the user's AC order."""
-    if entry.version < 4:
+    if entry.version < 5:
+        options = dict(entry.options)
+        if entry.version < 4:
+            options = version_4_options(options)
+        options = version_5_options(options)
+        entity_registry = er.async_get(hass)
+        if entity_id := entity_registry.async_get_entity_id(
+            "number",
+            DOMAIN,
+            f"{entry.entry_id}_feedback_sample_interval_minutes",
+        ):
+            entity_registry.async_remove(entity_id)
         hass.config_entries.async_update_entry(
             entry,
-            options=version_4_options(dict(entry.options)),
-            version=4,
+            options=options,
+            version=5,
         )
     return True
 

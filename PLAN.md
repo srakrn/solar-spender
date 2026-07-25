@@ -1,6 +1,6 @@
 # Solar Spender — Product and Implementation Plan
 
-Status: sampled-feedback baseline implemented
+Status: irregular-report feedback and bounded input freshness implemented
 Initial scope: Home Assistant custom integration with a sidebar panel and
 `climate` loads
 
@@ -89,11 +89,13 @@ Activation is staged:
 6. re-rank before considering another AC.
 
 Every activation and release uses a configurable majority confirmation window.
-The default is three fresh source snapshots at least five minutes apart, after a
-five-minute first-check delay. Activation also waits for that load's minimum-on
-deadline. A successful confirmation is followed by a five-minute pause before
-another AC may change. Each vote requires every configured feedback entity to
-report after its sampling boundary; cached readings never vote.
+The default is three distinct fresh source snapshots after a five-minute
+first-check delay, with 15 minutes to collect them. Activation also waits for
+that load's minimum-on deadline. A successful confirmation is followed by a
+five-minute pause before another AC may change. Each vote requires every
+configured feedback entity to report again; cached or already-consumed reports
+never vote. Source and configured battery readings older than 15 minutes fail
+closed by default.
 
 The current solar opportunity remembers supported and unsupported AC
 combinations. A failed combination is blocked until the opportunity ends, while
@@ -134,7 +136,8 @@ dehumidification.
 | Export reserve | 0 W | Grid-flow/observable-surplus modes |
 | First check delay | 5 min | Earliest report eligible after a load changes |
 | Confirmation checks | 3 | Strict majority of fresh reports |
-| Time between checks | 5 min | Minimum spacing; stale values never vote |
+| Confirmation timeout | 15 min | Fail closed if distinct fresh reports do not arrive |
+| Maximum input age | 15 min | Older source/battery readings are unavailable |
 | Wait before next AC | 5 min | Quiet period after successful confirmation |
 
 Defaults are provisional and must be presented for user confirmation.
@@ -147,15 +150,20 @@ status-direction path; other installations default to battery power direction.
 Schema v4 separates zero-export minimum production from deficit hysteresis.
 Existing zero-export entry/exit values migrate conservatively into a lower
 entry deficit, higher exit deficit, and a separate minimum-production guard.
+Schema v5 removes fixed spacing between feedback checks. It adds a bounded
+confirmation timeout and maximum source/battery input age so irregular reports
+remain usable without allowing confirmation or cached values to wait forever.
 
 The runtime timing controls are also exposed under one Solar Spender device as
 Home Assistant entities: an Automation switch and number entities for first
-check delay, confirmation checks, check spacing, and the delay before the next
-AC. A read-only Waste headroom binary sensor exposes whether the valid, latched
-source opportunity would otherwise remain unused, even while automation is
-disabled. When battery feedback is configured, charging, discharging, unknown
-direction, or an unsatisfied gate keeps that sensor off. Source wiring and
-per-AC profiles remain panel configuration.
+check delay, confirmation checks, confirmation timeout, maximum input age, and
+the delay before the next AC. The same timing controls are editable from the
+integration's Settings options form and sidebar panel. A read-only Waste
+headroom binary sensor exposes whether the valid, latched source opportunity
+would otherwise remain unused, even while automation is disabled. When battery
+feedback is configured, charging, discharging, unknown direction, or an
+unsatisfied gate keeps that sensor off. Source wiring and per-AC profiles remain
+panel configuration.
 
 ### Source: grid-flow mode
 
@@ -181,7 +189,7 @@ spendable power separately so a reversed sign or unsuitable sensor is obvious.
 - whole-home consumption power entity;
 - entry threshold in watts;
 - lower exit threshold in watts;
-- optional future maximum sample age.
+- maximum sample age.
 
 Normalize supported power units to watts. In **observable-surplus** strategy,
 raw surplus is true at or above the entry threshold while idle. While spending,
@@ -328,7 +336,8 @@ PROBING
 WAITING_FEEDBACK
   ├─ all sources report fresh + supported ─> SPENDING
   ├─ fresh feedback unsupported ───────────> release candidate safely
-  └─ reports still cached/stale ───────────> remain waiting
+  ├─ reports still cached/stale ───────────> remain waiting
+  └─ confirmation timeout ─────────────────> fail closed and release safely
 
 SHEDDING
   ├─ source recovers ────────> SPENDING
@@ -355,9 +364,11 @@ Clarifications:
   opens at the lower maximum deficit and closes at the higher exit deficit.
 - A timer never authorizes another load change by itself. After every activation
   or release, each configured source and battery-feedback entity must produce a
-  new Home Assistant report after each sampling boundary. The strict majority
-  of the configured checks decides the result. Unchanged values count only
-  through Home Assistant's filtered `state_reported` event.
+  distinct new Home Assistant report for every vote after the settling
+  boundary. The strict majority of the configured checks decides the result.
+  Unchanged values count only through Home Assistant's filtered
+  `state_reported` event. If enough reports do not arrive before the configured
+  timeout, the assessment fails closed.
 - If fresh post-activation feedback loses surplus, release the just-added load
   and block that load for the rest of the current opportunity. Removing it and
   seeing headroom return does not re-arm it. Clear the block only after fresh

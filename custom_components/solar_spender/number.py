@@ -17,7 +17,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import async_update_runtime_option
 from .const import (
     CONF_FEEDBACK_SAMPLE_COUNT,
-    CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES,
+    CONF_FEEDBACK_TIMEOUT_MINUTES,
+    CONF_INPUT_MAX_AGE_MINUTES,
     CONF_NEXT_LOAD_DELAY_MINUTES,
     CONF_SETTLING_SECONDS,
     DEFAULT_OPTIONS,
@@ -59,10 +60,19 @@ _TIMINGS = (
         lambda value: int(value),
     ),
     TimingDescription(
-        CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES,
-        "minutes_between_checks",
+        CONF_FEEDBACK_TIMEOUT_MINUTES,
+        "confirmation_timeout",
         1,
-        60,
+        1440,
+        1,
+        float,
+        float,
+    ),
+    TimingDescription(
+        CONF_INPUT_MAX_AGE_MINUTES,
+        "maximum_input_age",
+        1,
+        1440,
         1,
         float,
         float,

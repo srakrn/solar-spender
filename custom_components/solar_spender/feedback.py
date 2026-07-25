@@ -6,6 +6,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 
+def input_is_fresh(
+    reported_at: datetime | None,
+    *,
+    now: datetime,
+    maximum_age: timedelta,
+) -> bool:
+    """Return whether a decision input remains within its configured age."""
+    return reported_at is not None and now - reported_at <= maximum_age
+
+
 def append_bounded_event(
     history: list[dict[str, str]],
     *,
@@ -22,26 +32,35 @@ def append_bounded_event(
 
 @dataclass(slots=True)
 class FeedbackAssessment:
-    """Collect spaced, fresh source votes after one controlled load change."""
+    """Collect distinct fresh source votes after one controlled load change."""
 
     action: str
     load_entity_id: str
     next_not_before: datetime
+    deadline: datetime
     required_entities: frozenset[str]
     sample_count: int
-    sample_interval: timedelta
     votes: list[bool] = field(default_factory=list)
     measurements_w: list[float] = field(default_factory=list)
+    consumed_reports: dict[str, datetime] = field(default_factory=dict)
     baseline_consumption_w: float | None = None
 
     def pending_entities(self, reports: dict[str, datetime]) -> frozenset[str]:
-        """Return feedback entities which have not reported for this vote."""
+        """Return entities without a distinct eligible report for this vote."""
         return frozenset(
             entity_id
             for entity_id in self.required_entities
             if reports.get(entity_id) is None
             or reports[entity_id] < self.next_not_before
+            or (
+                entity_id in self.consumed_reports
+                and reports[entity_id] <= self.consumed_reports[entity_id]
+            )
         )
+
+    def timed_out(self, now: datetime) -> bool:
+        """Return whether the fail-closed confirmation deadline has passed."""
+        return not self.complete and now >= self.deadline
 
     @property
     def complete(self) -> bool:
@@ -62,17 +81,27 @@ class FeedbackAssessment:
         self,
         *,
         supported: bool,
-        accepted_at: datetime,
+        reports: dict[str, datetime],
         measurement_w: float | None = None,
     ) -> None:
-        """Record one fresh vote and advance the next sampling boundary."""
+        """Record one vote and consume the reports that made it eligible."""
         if self.complete:
             raise RuntimeError("feedback assessment is already complete")
+        pending = self.pending_entities(reports)
+        if pending:
+            raise RuntimeError(
+                "feedback vote is missing fresh reports from "
+                + ", ".join(sorted(pending))
+            )
         self.votes.append(supported)
+        self.consumed_reports.update(
+            {
+                entity_id: reports[entity_id]
+                for entity_id in self.required_entities
+            }
+        )
         if measurement_w is not None:
             self.measurements_w.append(measurement_w)
-        if not self.complete:
-            self.next_not_before = accepted_at + self.sample_interval
 
 
 @dataclass(frozen=True, slots=True)

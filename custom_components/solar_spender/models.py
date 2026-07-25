@@ -34,9 +34,10 @@ from .const import (
     CONF_EXIT_THRESHOLD_W,
     CONF_EXPORT_RESERVE_W,
     CONF_FEEDBACK_SAMPLE_COUNT,
-    CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES,
+    CONF_FEEDBACK_TIMEOUT_MINUTES,
     CONF_GRID_ENTITY_ID,
     CONF_GRID_EXPORT_POSITIVE,
+    CONF_INPUT_MAX_AGE_MINUTES,
     CONF_LOADS,
     CONF_MINIMUM_PRODUCTION_W,
     CONF_NEXT_LOAD_DELAY_MINUTES,
@@ -128,7 +129,8 @@ class SolarSpenderConfig:
     export_reserve_w: float
     settling_seconds: int
     feedback_sample_count: int
-    feedback_sample_interval_minutes: float
+    feedback_timeout_minutes: float
+    input_max_age_minutes: float
     next_load_delay_minutes: float
     loads: tuple[LoadConfig, ...]
     battery_policy: str
@@ -182,17 +184,20 @@ class SolarSpenderConfig:
             raise ConfigurationError(
                 "Number of checks must be 1, 3, 5, 7, or 9."
             )
-        sample_interval = float(merged[CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES])
+        feedback_timeout = float(merged[CONF_FEEDBACK_TIMEOUT_MINUTES])
+        input_max_age = float(merged[CONF_INPUT_MAX_AGE_MINUTES])
         next_load_delay = float(merged[CONF_NEXT_LOAD_DELAY_MINUTES])
         if (
-            not isfinite(sample_interval)
-            or sample_interval < 1
+            not isfinite(feedback_timeout)
+            or feedback_timeout < 1
+            or not isfinite(input_max_age)
+            or input_max_age < 1
             or not isfinite(next_load_delay)
             or next_load_delay < 0
         ):
             raise ConfigurationError(
-                "Wait at least one minute between checks. The wait before the "
-                "next AC cannot be negative."
+                "Check timeout and maximum input age must be at least one "
+                "minute. The wait before the next AC cannot be negative."
             )
         loads = tuple(LoadConfig.from_dict(item) for item in merged[CONF_LOADS])
         entity_ids = [load.entity_id for load in loads]
@@ -232,7 +237,8 @@ class SolarSpenderConfig:
             export_reserve_w=export_reserve,
             settling_seconds=settling,
             feedback_sample_count=sample_count,
-            feedback_sample_interval_minutes=sample_interval,
+            feedback_timeout_minutes=feedback_timeout,
+            input_max_age_minutes=input_max_age,
             next_load_delay_minutes=next_load_delay,
             loads=loads,
             battery_policy=battery_policy,

@@ -13,7 +13,7 @@ PLATFORMS: Final[list[Platform]] = [
     Platform.SWITCH,
 ]
 
-PANEL_VERSION: Final = "0.7.0"
+PANEL_VERSION: Final = "0.8.0"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
@@ -36,7 +36,8 @@ CONF_MINIMUM_PRODUCTION_W: Final = "minimum_production_w"
 CONF_EXPORT_RESERVE_W: Final = "export_reserve_w"
 CONF_SETTLING_SECONDS: Final = "settling_seconds"
 CONF_FEEDBACK_SAMPLE_COUNT: Final = "feedback_sample_count"
-CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES: Final = "feedback_sample_interval_minutes"
+CONF_FEEDBACK_TIMEOUT_MINUTES: Final = "feedback_timeout_minutes"
+CONF_INPUT_MAX_AGE_MINUTES: Final = "input_max_age_minutes"
 CONF_NEXT_LOAD_DELAY_MINUTES: Final = "next_load_delay_minutes"
 CONF_LOADS: Final = "loads"
 CONF_BATTERY_POLICY: Final = "battery_policy"
@@ -90,7 +91,8 @@ DEFAULT_OPTIONS: Final = {
     CONF_EXPORT_RESERVE_W: 0.0,
     CONF_SETTLING_SECONDS: 300,
     CONF_FEEDBACK_SAMPLE_COUNT: 3,
-    CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES: 5.0,
+    CONF_FEEDBACK_TIMEOUT_MINUTES: 15.0,
+    CONF_INPUT_MAX_AGE_MINUTES: 15.0,
     CONF_NEXT_LOAD_DELAY_MINUTES: 5.0,
     CONF_LOADS: [],
     CONF_BATTERY_POLICY: BATTERY_DISABLED,

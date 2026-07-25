@@ -25,6 +25,7 @@ def current_options(options: dict[str, Any]) -> dict[str, Any]:
         "binary_entity_id",
         "binary_on_delay_minutes",
         "binary_off_delay_minutes",
+        "feedback_sample_interval_minutes",
     ):
         normalized.pop(key, None)
     if "battery_direction_source" not in normalized:
@@ -47,4 +48,13 @@ def version_4_options(options: dict[str, Any]) -> dict[str, Any]:
         normalized["exit_threshold_w"] = 300
     else:
         normalized.setdefault("minimum_production_w", 300)
+    return normalized
+
+
+def version_5_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Replace fixed report spacing with timeout and input-age limits."""
+    normalized = current_options(options)
+    normalized.pop("feedback_sample_interval_minutes", None)
+    normalized.setdefault("feedback_timeout_minutes", 15.0)
+    normalized.setdefault("input_max_age_minutes", 15.0)
     return normalized
