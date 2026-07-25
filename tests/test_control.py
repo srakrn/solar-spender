@@ -33,7 +33,7 @@ class OwnedLoadSheddingTests(unittest.TestCase):
             probing=False,
         )
 
-        self.assertEqual(reason, "surplus unavailable")
+        self.assertEqual(reason, "not enough spare solar")
 
     def test_battery_discharge_sheds_even_if_source_is_still_latched(self) -> None:
         reason = CONTROL.owned_load_shed_reason(
@@ -44,7 +44,7 @@ class OwnedLoadSheddingTests(unittest.TestCase):
             probing=False,
         )
 
-        self.assertIn("no longer solar-supported", reason)
+        self.assertEqual(reason, "battery is discharging")
 
     def test_idle_gate_closure_does_not_abruptly_shed_running_load(self) -> None:
         reason = CONTROL.owned_load_shed_reason(
@@ -66,7 +66,7 @@ class OwnedLoadSheddingTests(unittest.TestCase):
             probing=True,
         )
 
-        self.assertEqual(reason, "battery gate closed during probe")
+        self.assertEqual(reason, "battery blocked the test")
 
     def test_battery_discharge_magnitude_can_size_release(self) -> None:
         self.assertEqual(

@@ -47,21 +47,21 @@ const PANEL_VERSION = "0.7.0";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
-  enabled: [["true", "Enabled"], ["false", "Disabled"]],
+  enabled: [["true", "On"], ["false", "Off"]],
   source_type: [
-    ["grid_flow", "Grid export"],
-    ["production_consumption", "Solar production minus home use"],
-    ["curtailed_production", "Zero-export solar · test one AC at a time"],
+    ["grid_flow", "Grid meter"],
+    ["production_consumption", "Solar minus home use"],
+    ["curtailed_production", "Zero-export system"],
   ],
   grid_export_positive: [
     ["true", "Export is positive"],
     ["false", "Import is positive"],
   ],
   battery_policy: [
-    ["disabled", "Disabled"],
-    ["require_charging", "Require charging"],
-    ["charging_or_soc", "Charging or SOC threshold"],
-    ["full_idle_for_probe", "Full battery before zero-export testing"],
+    ["disabled", "Ignore battery"],
+    ["require_charging", "Battery must be charging"],
+    ["charging_or_soc", "Charging or above set level"],
+    ["full_idle_for_probe", "Full and idle"],
   ],
   battery_direction_source: [
     ["power", "Battery power sensor"],
@@ -181,7 +181,7 @@ class SolarSpenderPanelHost extends HTMLElement {
       this._error = null;
       this._loaded = true;
     } catch (error) {
-      this._error = error?.message || "Solar Spender is not configured yet.";
+      this._error = error?.message || "Solar Spender is not set up.";
     } finally {
       this._loading = false;
     }
@@ -192,14 +192,14 @@ class SolarSpenderPanelHost extends HTMLElement {
     const app = this._shadow?.querySelector("#app");
     if (!app) return;
     if (this._error) {
-      app.innerHTML = `<div class="alert alert-info"><h1 class="h4">Solar Spender</h1><p class="mb-0">${this._escape(this._error)} Add the integration from Settings → Devices & services, then return here.</p></div>`;
+      app.innerHTML = `<div class="alert alert-info"><h1 class="h4">Solar Spender</h1><p class="mb-0">${this._escape(this._error)} Add it in Settings → Devices & services, then come back here.</p></div>`;
       return;
     }
     const status = this._status || {};
     const cards = statusPresentations(status, this._options);
     app.innerHTML = `
       <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-        <div><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Use spare solar power for climate loads.</p></div>
+        <div><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Run your ACs on spare solar.</p></div>
         <div class="d-flex flex-wrap align-items-center gap-2">
           <div class="btn-group" role="group" aria-label="Temporarily pause Solar Spender">
             <button class="btn btn-outline-warning" data-pause-minutes="5" type="button" ${status.enabled ? "" : "disabled"}>Pause 5 min</button>
@@ -213,39 +213,39 @@ class SolarSpenderPanelHost extends HTMLElement {
       <div class="small mb-3 ${status.paused ? "text-warning" : "text-body-secondary"}" id="pause_result" role="status">${this._escape(this._pauseSummary(status))}</div>
       <div class="row g-3 mb-3">
         ${this._card("Solar Spender", cards.controller.value, cards.controller.detail)}
-        ${this._card("Waste headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
-        ${this._card("Battery condition", cards.battery.value, cards.battery.detail)}
-        ${this._card("Source feedback", cards.feedback.value, cards.feedback.detail)}
-        ${this._card("Learned capacity", this._learnedRange(status), "Temporary estimate for the current solar opportunity.")}
-        ${this._card("Solar Spender ACs", `${status.owned_loads?.length || 0} owned`, status.discarded_lease_count ? `${status.discarded_lease_count} ambiguous lease(s) were not restored; those ACs were left untouched.` : status.restored_lease_count ? `${status.restored_lease_count} lease(s) recovered after restart or reload. Only profile-matched leases are restored.` : "Only ACs started by Solar Spender can be released automatically.")}
+        ${this._card("Spare solar", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
+        ${this._card("Battery check", cards.battery.value, cards.battery.detail)}
+        ${this._card("AC check", cards.feedback.value, cards.feedback.detail)}
+        ${this._card("Solar limit", this._learnedRange(status), "Rough limit for the current period of spare solar.")}
+        ${this._card("ACs", `${status.owned_loads?.length || 0} owned`, status.discarded_lease_count ? `${status.discarded_lease_count} saved AC state(s) could not be trusted. Those ACs were left alone.` : status.restored_lease_count ? `${status.restored_lease_count} owned AC(s) restored after restart.` : "Solar Spender turns off only ACs it turned on.")}
       </div>
       <div class="row g-3">
         <section class="col-12 col-xxl-8"><ha-card><div class="card-content">
-          <h2 class="h5 mb-3 section-heading">Configuration</h2>
+          <h2 class="h5 mb-3 section-heading">Settings</h2>
           <form id="settings" class="row g-3" novalidate>
-            <div class="col-md-6">${this._selectField("enabled", "Automation", "Solar Spender never calls a climate service while disabled.")}</div>
-            <div class="col-md-6">${this._selectField("source_type", "Surplus source", "Choose the measurement strategy for this solar installation.")}</div>
+            <div class="col-md-6">${this._selectField("enabled", "Solar Spender", "When off, Solar Spender will not change any AC.")}</div>
+            <div class="col-md-6">${this._selectField("source_type", "How to find spare solar", "Choose the sensors that match your solar system.")}</div>
             <div class="col-12">${this._sourceConfiguration()}</div>
             <div class="col-12">${this._batteryConfiguration()}</div>
             <div class="col-12 config-section">
-              <h3 class="h6 mb-3 section-heading">Confirmation timing</h3>
+              <h3 class="h6 mb-3 section-heading">Check timing</h3>
               <div class="row g-3">
-                <div class="col-md-6">${this._numberField("settling_seconds", "First check delay", "Ignore sensor updates for this long after an AC changes. For activation, the AC's minimum-on time must also finish.", 0, null, "seconds")}</div>
-                <div class="col-md-6">${this._numberField("feedback_sample_count", "Confirmation checks", "Number of fresh checks used for the decision. A strict majority must report headroom.", 1, 9, "checks", 2)}</div>
-                <div class="col-md-6">${this._numberField("feedback_sample_interval_minutes", "Time between checks", "Minimum spacing between fresh sensor reports that may count as confirmation votes.", 1, 60, "minutes")}</div>
-                <div class="col-md-6">${this._numberField("next_load_delay_minutes", "Wait before next AC", "After confirmation succeeds, wait this long before considering another AC.", 0, 60, "minutes")}</div>
-                <div class="col-12"><div class="alert alert-secondary mb-0">Default cadence: first check after 5 minutes, 3 fresh checks 5 minutes apart, then wait 5 minutes before another AC.</div></div>
+                <div class="col-md-6">${this._numberField("settling_seconds", "Wait before first check", "Wait this long after changing an AC.", 0, null, "seconds")}</div>
+                <div class="col-md-6">${this._numberField("feedback_sample_count", "Number of checks", "How many checks to make. More than half must pass.", 1, 9, "checks", 2)}</div>
+                <div class="col-md-6">${this._numberField("feedback_sample_interval_minutes", "Wait between checks", "Time between each check.", 1, 60, "minutes")}</div>
+                <div class="col-md-6">${this._numberField("next_load_delay_minutes", "Wait before next AC", "After a pass, wait this long before trying another AC.", 0, 60, "minutes")}</div>
+                <div class="col-12"><div class="alert alert-secondary mb-0">Default: wait 5 minutes, check 3 times 5 minutes apart, then wait 5 minutes before another AC.</div></div>
               </div>
             </div>
-            <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">Climate loads</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender controls only ACs it started itself.</p></div>
+            <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">ACs</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender turns off only ACs it turned on.</p></div>
             <div class="col-12" id="load_rows">${this._loadRows()}</div>
-            <div class="col-12 d-flex align-items-center gap-2"><button class="btn btn-primary" type="submit">Save configuration</button><span id="save_result" class="small" role="status"></span></div>
+            <div class="col-12 d-flex align-items-center gap-2"><button class="btn btn-primary" type="submit">Save</button><span id="save_result" class="small" role="status"></span></div>
           </form>
         </div></ha-card></section>
         <section class="col-12 col-xxl-4">
           <div class="d-grid gap-3">
-            <ha-card><div class="card-content"><h2 class="h5 section-heading">Loads now</h2>${this._loads(status.loads || [])}</div></ha-card>
-            <ha-card><div class="card-content"><h2 class="h5 section-heading">Recent decisions</h2>${this._history(status.history || [])}</div></ha-card>
+            <ha-card><div class="card-content"><h2 class="h5 section-heading">ACs now</h2>${this._loads(status.loads || [])}</div></ha-card>
+            <ha-card><div class="card-content"><h2 class="h5 section-heading">Recent activity</h2>${this._history(status.history || [])}</div></ha-card>
           </div>
         </section>
       </div>`;
@@ -538,13 +538,13 @@ class SolarSpenderPanelHost extends HTMLElement {
       const response = await this._hass.connection.sendMessagePromise({ type: "solar_spender/config/update", options });
       result.className = "small text-success";
       result.textContent = response.reloading
-        ? "Saved. Reloading Solar Spender…"
+        ? "Saved. Reloading…"
         : "Saved.";
       this._options = options;
       window.setTimeout(() => this._load(), 800);
     } catch (error) {
       result.className = "small text-danger";
-      result.textContent = error?.message || "Configuration could not be saved.";
+      result.textContent = error?.message || "Could not save.";
     }
   }
 
@@ -562,22 +562,22 @@ class SolarSpenderPanelHost extends HTMLElement {
       this._render();
     } catch (error) {
       result.className = "small mb-3 text-danger";
-      result.textContent = error?.message || "Pause control failed.";
+      result.textContent = error?.message || "Could not change the pause.";
     }
   }
 
   _pauseSummary(status) {
     if (!status.enabled) {
-      return "Enable Automation before using a timed pause.";
+      return "Turn on Solar Spender to use pause.";
     }
     if (!status.paused) {
-      return "A timed pause ignores short-lived household peaks without starting or releasing any AC.";
+      return "Pause keeps every AC as it is.";
     }
     const minutes = Math.max(
       1,
       Math.ceil(Number(status.pause_remaining_seconds || 0) / 60),
     );
-    return `Paused for about ${minutes} more minute${minutes === 1 ? "" : "s"}. Input changes are frozen and owned ACs stay untouched.`;
+    return `Paused for about ${minutes} more minute${minutes === 1 ? "" : "s"}. ACs stay as they are.`;
   }
 
   _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, power_entity_id: "", min_on_seconds: 300, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
@@ -594,39 +594,39 @@ class SolarSpenderPanelHost extends HTMLElement {
     let fields;
     if (visibility.grid) {
       fields = `
-        <div class="col-md-6">${this._entityField("grid_entity_id", "Grid-flow entity", "A measurement power sensor that reports import and export in W or kW.")}</div>
-        <div class="col-md-6">${this._selectField("grid_export_positive", "Grid sensor sign", "Tell Solar Spender which sign means export so it can normalize the measurement.")}</div>
-        <div class="col-md-4">${this._numberField("export_reserve_w", "Export reserve", "Watts intentionally left available for export.", 0, null, "W")}</div>
-        <div class="col-md-4">${this._numberField("entry_threshold_w", "Entry margin", "Spend only when export above the reserve reaches this margin.", 0, null, "W")}</div>
-        <div class="col-md-4">${this._numberField("exit_threshold_w", "Exit margin", "Stop spending at this lower margin to prevent oscillation.", 0, null, "W")}</div>`;
+        <div class="col-md-6">${this._entityField("grid_entity_id", "Grid power sensor", "Sensor that shows grid import and export in W or kW.")}</div>
+        <div class="col-md-6">${this._selectField("grid_export_positive", "Grid sensor direction", "Choose which sign means export.")}</div>
+        <div class="col-md-4">${this._numberField("export_reserve_w", "Keep exporting", "Solar Spender leaves this many watts for export.", 0, null, "W")}</div>
+        <div class="col-md-4">${this._numberField("entry_threshold_w", "Start above", "Extra export needed before starting an AC.", 0, null, "W")}</div>
+        <div class="col-md-4">${this._numberField("exit_threshold_w", "Stop below", "Turn off an owned AC when extra export falls this low.", 0, null, "W")}</div>`;
     } else {
       const entryLabel = visibility.curtailed
-        ? "Maximum deficit to start testing"
-        : "Entry threshold";
+        ? "Start test below"
+        : "Start above";
       const entryHelp = visibility.curtailed
-        ? "Start a one-AC test when consumption minus production is at or below this value. Lower is stricter."
-        : "Surplus becomes available at or above this value.";
+        ? "Test one AC when home use minus solar is this value or less."
+        : "Spare solar must reach this value before starting an AC.";
       const exitLabel = visibility.curtailed
-        ? "Deficit that stops testing"
-        : "Exit threshold";
+        ? "Stop test above"
+        : "Stop below";
       const exitHelp = visibility.curtailed
-        ? "After entry, keep the opportunity active until consumption minus production reaches this larger value. Must be greater than the start threshold."
-        : "Surplus remains latched until it falls to this lower value.";
+        ? "Stop testing when home use minus solar reaches this larger value."
+        : "Turn off an owned AC when spare solar falls this low.";
       fields = `
-        <div class="col-md-6">${this._entityField("production_entity_id", "Production power entity", "Current solar production from a measurement power sensor using W or kW.")}</div>
-        <div class="col-md-6">${this._entityField("consumption_entity_id", "Consumption power entity", "Whole-home consumption measured at the same electrical boundary as production.")}</div>
+        <div class="col-md-6">${this._entityField("production_entity_id", "Solar power sensor", "Current solar production in W or kW.")}</div>
+        <div class="col-md-6">${this._entityField("consumption_entity_id", "Home power sensor", "Current whole-home use in W or kW.")}</div>
         ${visibility.curtailed
-          ? `<div class="col-md-4">${this._numberField("minimum_production_w", "Minimum solar production", "Do not test hidden capacity below this production level. This prevents nighttime zero production and zero consumption from qualifying.", 0, null, "W")}</div>`
+          ? `<div class="col-md-4">${this._numberField("minimum_production_w", "Minimum solar power", "Do not test an AC below this solar power.", 0, null, "W")}</div>`
           : ""}
         <div class="${visibility.curtailed ? "col-md-4" : "col-md-6"}">${this._numberField("entry_threshold_w", entryLabel, entryHelp, 0, null, "W")}</div>
         <div class="${visibility.curtailed ? "col-md-4" : "col-md-6"}">${this._numberField("exit_threshold_w", exitLabel, exitHelp, 0, null, "W")}</div>
         ${visibility.curtailed
-          ? `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Deficit = consumption − production.</strong> With start ${this._escape(this._options.entry_threshold_w)} W and stop ${this._escape(this._options.exit_threshold_w)} W: a deficit at or below the start value permits a test; after entry, the opportunity remains active until deficit reaches the larger stop value.</div></div><div class="col-12"><div class="alert alert-warning mb-0">A small deficit is only permission to test—it does not prove spare solar exists. Zero-export testing also requires <strong>Full battery before zero-export testing</strong>, and Solar Spender changes only one AC before checking fresh readings.</div></div>`
-          : `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Measured headroom = production − consumption.</strong> Headroom must reach the higher entry threshold to start spending. Once active, it may fall between the thresholds; Solar Spender stops only when it reaches the lower exit threshold.</div></div>`}`;
+          ? `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Gap = home use − solar.</strong> Test at ${this._escape(this._options.entry_threshold_w)} W or less. Stop at ${this._escape(this._options.exit_threshold_w)} W or more.</div></div><div class="col-12"><div class="alert alert-warning mb-0">A small gap does not prove spare solar exists. The battery must be full and idle. Solar Spender tests only one AC at a time.</div></div>`
+          : `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Spare solar = solar − home use.</strong> Start at the higher value. Stop at the lower value.</div></div>`}`;
     }
     return `
       <div class="config-section">
-        <h3 class="h6 mb-3 section-heading">Solar source · ${this._escape(
+        <h3 class="h6 mb-3 section-heading">Solar sensors · ${this._escape(
           SELECT_OPTIONS.source_type.find(([value]) => value === this._options.source_type)?.[1] || this._options.source_type,
         )}</h3>
         <div class="alert alert-info">${this._escape(sourceModeDescription(this._options.source_type))}</div>
@@ -641,31 +641,31 @@ class SolarSpenderPanelHost extends HTMLElement {
     );
     let fields = "";
     if (visibility.direction) {
-      fields += `<div class="col-md-6">${this._selectField("battery_direction_source", "How to detect charging", "Use a status entity when available, or infer direction from a live battery power sensor.")}</div>`;
+      fields += `<div class="col-md-6">${this._selectField("battery_direction_source", "How to read the battery", "Use a status entity or a battery power sensor.")}</div>`;
     }
     if (visibility.status) {
-      fields += `<div class="col-md-6">${this._entityField("battery_status_entity_id", "Battery status entity", "Must report charging, idle, or discharging, or use the battery-charging binary sensor class.")}</div>`;
+      fields += `<div class="col-md-6">${this._entityField("battery_status_entity_id", "Battery status entity", "Must show charging, idle, or discharging.")}</div>`;
     }
     if (visibility.power) {
       const negativeCharging = this._options.battery_power_charging_positive === false;
       const chargingExample = negativeCharging ? "−200 W" : "+200 W";
       const dischargingExample = negativeCharging ? "+200 W" : "−200 W";
       fields += `
-        <div class="col-md-4">${this._entityField("battery_power_entity_id", "Battery power entity", "Live battery charge/discharge power from a measurement sensor using W or kW.")}</div>
-        <div class="col-md-4">${this._selectField("battery_power_charging_positive", "Battery power sign", "Select which sensor sign means power is flowing into the battery.")}</div>
-        <div class="col-md-4">${this._numberField("battery_power_threshold_w", "Idle threshold magnitude", "Enter a positive magnitude without a plus or minus sign. Readings in either direction up to this value are treated as idle.", 0, null, "W")}</div>
-        <div class="col-12"><div class="alert alert-secondary mb-0"><strong>The threshold is always positive.</strong> With a 100 W threshold, −50 W and +50 W are idle; ${chargingExample} is charging and ${dischargingExample} is discharging for the selected sign convention.</div></div>`;
+        <div class="col-md-4">${this._entityField("battery_power_entity_id", "Battery power sensor", "Current battery power in W or kW.")}</div>
+        <div class="col-md-4">${this._selectField("battery_power_charging_positive", "Charging direction", "Choose which sign means charging.")}</div>
+        <div class="col-md-4">${this._numberField("battery_power_threshold_w", "Idle range", "Power from minus this value to plus this value counts as idle.", 0, null, "W")}</div>
+        <div class="col-12"><div class="alert alert-secondary mb-0">With a 100 W idle range, −50 W and +50 W are idle. ${chargingExample} is charging. ${dischargingExample} is discharging.</div></div>`;
     }
     if (visibility.soc) {
       fields += `
-        <div class="col-md-6">${this._entityField("battery_soc_entity_id", "Battery SOC entity", "Battery state of charge from a measurement battery sensor using %.")}</div>
-        <div class="col-md-6">${this._numberField("battery_full_threshold", "Full/SOC threshold", "Battery percentage required by the selected policy.", 0, 100, "%")}</div>`;
+        <div class="col-md-6">${this._entityField("battery_soc_entity_id", "Battery level sensor", "Battery level in percent.")}</div>
+        <div class="col-md-6">${this._numberField("battery_full_threshold", "Required battery level", "Battery must reach this percentage.", 0, 100, "%")}</div>`;
     }
     return `
       <div class="config-section">
-        <h3 class="h6 mb-3 section-heading">Battery condition</h3>
+        <h3 class="h6 mb-3 section-heading">Battery</h3>
         <div class="row g-3">
-          <div class="col-md-6">${this._selectField("battery_policy", "Battery policy", "Choose whether battery state may block new AC activation.")}</div>
+          <div class="col-md-6">${this._selectField("battery_policy", "Battery rule", "Choose when the battery allows a new AC.")}</div>
           <div class="col-12"><div class="alert alert-info mb-0">${this._escape(batteryPolicyDescription(policy))}</div></div>
           ${fields}
         </div>
@@ -682,22 +682,22 @@ class SolarSpenderPanelHost extends HTMLElement {
     };
   }
   _loadRows() {
-    if (!this._options.loads.length) return `<div class="alert alert-secondary mb-0">No ACs configured. Add an AC to enable automatic climate control.</div>`;
+    if (!this._options.loads.length) return `<div class="alert alert-secondary mb-0">No ACs added.</div>`;
     return this._options.loads.map((load, index) => {
       const capabilities = this._climateCapabilities(load.entity_id);
       return `<ha-card class="load-card mb-3" data-load-row="${index}"><div class="card-content">
-        <div class="d-flex justify-content-between align-items-center mb-3"><div><strong>${this._escape(this._hass?.states?.[load.entity_id]?.attributes?.friendly_name || `AC ${index + 1}`)}</strong><div class="small text-body-secondary">${this._escape(load.entity_id || "Select a climate entity")}</div></div><button class="btn btn-sm btn-outline-danger" type="button" data-remove-load="${index}">Remove</button></div>
+        <div class="d-flex justify-content-between align-items-center mb-3"><div><strong>${this._escape(this._hass?.states?.[load.entity_id]?.attributes?.friendly_name || `AC ${index + 1}`)}</strong><div class="small text-body-secondary">${this._escape(load.entity_id || "Choose an AC")}</div></div><button class="btn btn-sm btn-outline-danger" type="button" data-remove-load="${index}">Remove</button></div>
         <div class="row g-3">
-          <div class="col-md-6">${this._label("Climate entity")}<ha-selector data-load-index="${index}"></ha-selector>${this._help("The air conditioner Solar Spender may start and later release.")}</div>
-          <div class="col-md-6">${this._label("Solar Spender control")}<ha-selector data-load-enabled-index="${index}"></ha-selector>${this._help("Disabled ACs stay configured but will not be started. Disabling never turns off an AC.")}</div>
-          <div class="col-md-6">${this._loadSelect(index, "hvac_mode", "Desired mode", "Only modes reported by the selected climate entity are offered.")}</div>
-          <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan mode", "Optional fan setting. Only fan modes reported by the selected climate entity are offered.")}</div>
-          <div class="col-md-6">${this._loadNumber(index, "temperature", "Target temperature", `Optional target in the selected AC's ${capabilities.minTemp}–${capabilities.maxTemp} °C range.`, capabilities.minTemp, capabilities.maxTemp, "°C", capabilities.tempStep)}</div>
-          <div class="col-md-6">${this._loadNumber(index, "priority", "Priority", "Lower numbers start first. During shedding, measured power chooses the best-sized AC; priority breaks ties and controls fallback order.", 0, null, "")}</div>
-          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Estimated draw", "Optional conservative running-power estimate. It is used when no valid live AC power reading is available.", 1, null, "W")}</div>
-          <div class="col-md-6">${this._label("Live AC power entity")}<ha-selector data-load-power-index="${index}"></ha-selector>${this._help("Optional W/kW measurement sensor for this AC. During shedding, its current reading is preferred over the estimate so Solar Spender can remove only enough load to cover the measured deficit.")}</div>
-          <div class="col-md-6">${this._loadNumber(index, "min_on_seconds", "Minimum on", "Seconds the AC must stay on before Solar Spender may release it.", 0, null, "seconds")}</div>
-          <div class="col-md-6">${this._loadNumber(index, "min_off_seconds", "Minimum off", "Seconds Solar Spender waits before it can start this AC again.", 0, null, "seconds")}</div>
+          <div class="col-md-6">${this._label("AC entity")}<ha-selector data-load-index="${index}"></ha-selector>${this._help("The AC Solar Spender may control.")}</div>
+          <div class="col-md-6">${this._label("Use this AC")}<ha-selector data-load-enabled-index="${index}"></ha-selector>${this._help("Turning this off does not turn off the AC.")}</div>
+          <div class="col-md-6">${this._loadSelect(index, "hvac_mode", "Mode", "Mode to use when starting this AC.")}</div>
+          <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan", "Fan setting to use. Leave unchanged if you do not care.")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "temperature", "Temperature", `Choose ${capabilities.minTemp}–${capabilities.maxTemp} °C, or leave it unchanged.`, capabilities.minTemp, capabilities.maxTemp, "°C", capabilities.tempStep)}</div>
+          <div class="col-md-6">${this._loadNumber(index, "priority", "Start order", "Lower numbers start first.", 0, null, "")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Usual power", "Estimated power used by this AC. Optional.", 1, null, "W")}</div>
+          <div class="col-md-6">${this._label("AC power sensor")}<ha-selector data-load-power-index="${index}"></ha-selector>${this._help("Current power used by this AC in W or kW. Optional.")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "min_on_seconds", "Keep on for", "Shortest time Solar Spender may leave the AC on.", 0, null, "seconds")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "min_off_seconds", "Keep off for", "Shortest wait before Solar Spender may start the AC again.", 0, null, "seconds")}</div>
         </div></div></ha-card>`;
     }).join("");
   }
@@ -711,10 +711,10 @@ class SolarSpenderPanelHost extends HTMLElement {
   _loads(loads) { return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => {
     const ownership = loadOwnershipPresentation(load);
     const draw = typeof load.current_power_w === "number"
-      ? ` · ${Math.round(load.current_power_w)} W current/estimated draw`
+      ? ` · about ${Math.round(load.current_power_w)} W`
       : "";
-    return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape((load.ownership_reason || "Ownership status unavailable") + draw)}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
-  }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`; }
+    return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape((load.ownership_reason || "Status unavailable") + draw)}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
+  }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No ACs added.</p>`; }
   _history(history) { return history.length ? `<ul class="list-group list-group-flush">${history.slice().reverse().map((item) => `<li class="list-group-item px-0 small"><div>${this._escape(item.message)}</div><div class="text-body-secondary">${this._escape(item.at)}</div></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No decisions yet.</p>`; }
   _watts(value) { return typeof value === "number" ? `${Math.round(value)} W` : "—"; }
   _learnedRange(status) {
@@ -723,14 +723,14 @@ class SolarSpenderPanelHost extends HTMLElement {
     if (typeof lower === "number" && typeof upper === "number") return `${Math.round(lower)}–<${Math.round(upper)} W`;
     if (typeof upper === "number") return `<${Math.round(upper)} W`;
     if (typeof lower === "number") return `≥${Math.round(lower)} W`;
-    return "Learning";
+    return "Not known yet";
   }
   _surplusDetail(status) {
     if (this._options.source_type === "curtailed_production") {
       return typeof status.opportunity_power_w === "number"
         && typeof status.source_deficit_w === "number"
-        ? `${Math.round(status.opportunity_power_w)} W production · ${Math.round(status.source_deficit_w)} W consumption-minus-production deficit · hidden headroom is unknown.`
-        : "Hidden headroom cannot be measured directly.";
+        ? `${Math.round(status.opportunity_power_w)} W solar · ${Math.round(status.source_deficit_w)} W gap · spare solar cannot be measured.`
+        : "Spare solar cannot be measured directly.";
     }
     return this._watts(status.headroom_w);
   }

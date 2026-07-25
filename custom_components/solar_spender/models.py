@@ -72,12 +72,12 @@ class LoadConfig:
         """Validate and create a load definition."""
         entity_id = cv.entity_id(value.get("entity_id", ""))
         if not entity_id.startswith("climate."):
-            raise ConfigurationError("load entity_id must use the climate domain")
+            raise ConfigurationError("Choose an AC entity.")
         hvac_mode = value.get("hvac_mode") or None
         temperature = value.get(ATTR_TEMPERATURE)
         fan_mode = value.get("fan_mode") or None
         if hvac_mode is None and temperature is None:
-            raise ConfigurationError("each load requires hvac_mode or temperature")
+            raise ConfigurationError("Choose a mode or temperature for each AC.")
         if temperature is not None:
             temperature = float(temperature)
         expected_power_w = value.get("expected_power_w")
@@ -85,19 +85,19 @@ class LoadConfig:
             expected_power_w = float(expected_power_w)
             if not isfinite(expected_power_w) or expected_power_w <= 0:
                 raise ConfigurationError(
-                    "expected_power_w must be finite and greater than zero"
+                    "Usual AC power must be greater than zero."
                 )
         power_entity_id = str(value.get("power_entity_id") or "")
         if power_entity_id:
             power_entity_id = cv.entity_id(power_entity_id)
             if not power_entity_id.startswith("sensor."):
                 raise ConfigurationError(
-                    "load power_entity_id must use the sensor domain"
+                    "Choose a sensor for AC power."
                 )
         min_on_seconds = int(value.get("min_on_seconds", 300))
         min_off_seconds = int(value.get("min_off_seconds", 900))
         if min_on_seconds < 0 or min_off_seconds < 0:
-            raise ConfigurationError("minimum on/off durations must not be negative")
+            raise ConfigurationError("AC on and off times cannot be negative.")
         return cls(
             entity_id=entity_id,
             priority=int(value.get("priority", 100)),
@@ -148,7 +148,7 @@ class SolarSpenderConfig:
         merged = {**DEFAULT_OPTIONS, **options}
         source_type = str(merged[CONF_SOURCE_TYPE])
         if source_type not in SOURCE_TYPES:
-            raise ConfigurationError("unsupported source_type")
+            raise ConfigurationError("Choose a valid solar sensor type.")
         entry = float(merged[CONF_ENTRY_THRESHOLD_W])
         exit_ = float(merged[CONF_EXIT_THRESHOLD_W])
         minimum_production = float(merged[CONF_MINIMUM_PRODUCTION_W])
@@ -156,11 +156,12 @@ class SolarSpenderConfig:
         if source_type == "curtailed_production":
             if entry >= exit_:
                 raise ConfigurationError(
-                    "zero-export entry deficit must be lower than exit deficit"
+                    "For zero export, “Start test below” must be lower than "
+                    "“Stop test above.”"
                 )
         elif entry <= exit_:
             raise ConfigurationError(
-                "entry_threshold_w must exceed exit_threshold_w"
+                "“Start above” must be higher than “Stop below.”"
             )
         if (
             not isfinite(entry)
@@ -172,14 +173,14 @@ class SolarSpenderConfig:
             or minimum_production < 0
             or export_reserve < 0
         ):
-            raise ConfigurationError("thresholds and export reserve must not be negative")
+            raise ConfigurationError("Solar power values cannot be negative.")
         settling = int(merged[CONF_SETTLING_SECONDS])
         if settling < 0:
-            raise ConfigurationError("settling_seconds must not be negative")
+            raise ConfigurationError("The first check wait cannot be negative.")
         sample_count = int(merged[CONF_FEEDBACK_SAMPLE_COUNT])
         if sample_count < 1 or sample_count > 9 or sample_count % 2 == 0:
             raise ConfigurationError(
-                "feedback_sample_count must be an odd number from 1 to 9"
+                "Number of checks must be 1, 3, 5, 7, or 9."
             )
         sample_interval = float(merged[CONF_FEEDBACK_SAMPLE_INTERVAL_MINUTES])
         next_load_delay = float(merged[CONF_NEXT_LOAD_DELAY_MINUTES])
@@ -190,19 +191,19 @@ class SolarSpenderConfig:
             or next_load_delay < 0
         ):
             raise ConfigurationError(
-                "feedback interval must be at least one minute and "
-                "next-load delay must not be negative"
+                "Wait at least one minute between checks. The wait before the "
+                "next AC cannot be negative."
             )
         loads = tuple(LoadConfig.from_dict(item) for item in merged[CONF_LOADS])
         entity_ids = [load.entity_id for load in loads]
         if len(entity_ids) != len(set(entity_ids)):
-            raise ConfigurationError("a climate entity may only be configured once")
+            raise ConfigurationError("Each AC can be added only once.")
         battery_policy = str(merged[CONF_BATTERY_POLICY])
         if battery_policy not in BATTERY_POLICIES:
-            raise ConfigurationError("unsupported battery policy")
+            raise ConfigurationError("Choose a valid battery rule.")
         battery_direction_source = str(merged[CONF_BATTERY_DIRECTION_SOURCE])
         if battery_direction_source not in BATTERY_DIRECTION_SOURCES:
-            raise ConfigurationError("unsupported battery direction source")
+            raise ConfigurationError("Choose how to read the battery.")
         battery_power_threshold_w = float(merged[CONF_BATTERY_POWER_THRESHOLD_W])
         battery_full_threshold = float(merged[CONF_BATTERY_FULL_THRESHOLD])
         if (
@@ -210,14 +211,14 @@ class SolarSpenderConfig:
             or battery_power_threshold_w < 0
         ):
             raise ConfigurationError(
-                "battery power threshold must be finite and not negative"
+                "Battery idle range cannot be negative."
             )
         if (
             not isfinite(battery_full_threshold)
             or battery_full_threshold < 0
             or battery_full_threshold > 100
         ):
-            raise ConfigurationError("battery SOC threshold must be from 0 to 100")
+            raise ConfigurationError("Battery level must be from 0% to 100%.")
         config = cls(
             enabled=bool(merged[CONF_ENABLED]),
             source_type=source_type,
@@ -258,16 +259,16 @@ class SolarSpenderConfig:
         if not self.enabled:
             return
         if self.source_type == "grid_flow" and not self.grid_entity_id:
-            raise ConfigurationError("grid_entity_id is required for grid-flow source")
+            raise ConfigurationError("Choose a grid power sensor.")
         if self.source_type in {"production_consumption", "curtailed_production"}:
             if not self.production_entity_id or not self.consumption_entity_id:
                 raise ConfigurationError(
-                    "production_entity_id and consumption_entity_id are required"
+                    "Choose both a solar power sensor and a home power sensor."
                 )
         if self.source_type == "curtailed_production":
             if self.battery_policy != BATTERY_FULL_IDLE_FOR_PROBE:
                 raise ConfigurationError(
-                    "curtailed_production requires full_idle_for_probe battery policy"
+                    "Zero-export systems require the “Full and idle” battery rule."
                 )
         if self.battery_policy == BATTERY_DISABLED:
             return
@@ -276,7 +277,7 @@ class SolarSpenderConfig:
             BATTERY_FULL_IDLE_FOR_PROBE,
         } and not self.battery_soc_entity_id:
             raise ConfigurationError(
-                "selected battery policy requires a battery SOC entity"
+                "Choose a battery level sensor."
             )
         if self.battery_policy in {
             BATTERY_REQUIRE_CHARGING,
@@ -288,12 +289,12 @@ class SolarSpenderConfig:
                 and not self.battery_status_entity_id
             ):
                 raise ConfigurationError(
-                    "battery status entity is required for status direction"
+                    "Choose a battery status entity."
                 )
             if (
                 self.battery_direction_source == BATTERY_DIRECTION_POWER
                 and not self.battery_power_entity_id
             ):
                 raise ConfigurationError(
-                    "battery power entity is required for power direction"
+                    "Choose a battery power sensor."
                 )

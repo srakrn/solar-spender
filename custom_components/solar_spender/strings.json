@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Solar Spender",
-        "description": "Create Solar Spender. Configure sources and loads from the Solar Spender sidebar panel."
+        "description": "Add Solar Spender. Set it up from the Solar Spender sidebar."
       }
     }
   },
@@ -11,14 +11,14 @@
     "step": {
       "init": {
         "title": "Solar Spender",
-        "description": "Configure Solar Spender from the sidebar panel at {panel}."
+        "description": "Open {panel} in the sidebar to change settings."
       }
     }
   },
   "entity": {
     "binary_sensor": {
       "headroom": {
-        "name": "Waste headroom"
+        "name": "Spare solar"
       }
     },
     "switch": {
@@ -28,13 +28,13 @@
     },
     "number": {
       "first_check_delay": {
-        "name": "First check delay"
+        "name": "Wait before first check"
       },
       "confirmation_checks": {
-        "name": "Confirmation checks"
+        "name": "Number of checks"
       },
       "minutes_between_checks": {
-        "name": "Minutes between checks"
+        "name": "Wait between checks"
       },
       "wait_before_next_ac": {
         "name": "Wait before next AC"

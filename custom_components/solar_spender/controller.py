@@ -89,7 +89,7 @@ class SolarSpenderController:
         self.battery_allowed = config.battery_policy == BATTERY_DISABLED
         self.battery_direction = "not_configured"
         self.battery_power_w: float | None = None
-        self.reason = "disabled" if not config.enabled else "awaiting source"
+        self.reason = "off" if not config.enabled else "waiting for solar sensors"
         self.raw_source_value: str | float | None = None
         self.source_valid = False
         self.headroom_w: float | None = None
@@ -140,8 +140,8 @@ class SolarSpenderController:
         if self._leases and not self._pause_is_active():
             self._begin_recovery_feedback("restored leases")
             self._record(
-                f"Restored {len(self._leases)} confirmed lease(s); "
-                "waiting for fresh source feedback"
+                f"Restored {len(self._leases)} owned AC(s). "
+                "Checking solar again."
             )
         if self._pause_is_active():
             assert self._paused_until is not None
@@ -182,9 +182,9 @@ class SolarSpenderController:
     async def async_set_pause(self, minutes: int) -> None:
         """Pause all controller reactions temporarily, or resume with zero."""
         if minutes < 0 or minutes > 1440:
-            raise HomeAssistantError("pause duration must be from 0 to 1440 minutes")
+            raise HomeAssistantError("Pause must be from 0 to 1440 minutes.")
         if minutes and not self.config.enabled:
-            raise HomeAssistantError("enable Solar Spender before pausing it")
+            raise HomeAssistantError("Turn on Solar Spender before pausing it.")
 
         # A climate change is atomic from the controller's perspective. If one
         # is already in flight, start the pause immediately after it completes.
@@ -316,19 +316,19 @@ class SolarSpenderController:
             if self._feedback_assessment is not None and not self.source_valid:
                 assessment = self._feedback_assessment
                 self._feedback_assessment = None
-                self._record("Feedback assessment failed: source became invalid")
+                self._record("Check failed because a solar sensor became unavailable.")
                 if assessment.action == "activation":
                     self._mark_unsupported_activation(
                         assessment.load_entity_id,
                         global_block=True,
                     )
                     await self._async_shed_one(
-                        "source became invalid during confirmation",
+                        "a solar sensor became unavailable during the check",
                         target_entity_id=assessment.load_entity_id,
                     )
                 elif assessment.action == "recovery" and self._leases:
                     await self._async_shed_one(
-                        "source invalid after restart recovery"
+                        "a solar sensor was unavailable after restart"
                     )
                 return
             if (
@@ -349,7 +349,7 @@ class SolarSpenderController:
                     global_block=True,
                 )
                 await self._async_shed_one(
-                    "battery did not support the activation",
+                    "the battery could not support the new AC",
                     target_entity_id=assessment.load_entity_id,
                 )
                 return
@@ -367,7 +367,7 @@ class SolarSpenderController:
                     global_block=True,
                 )
                 await self._async_shed_one(
-                    "grid import exceeded the configured export reserve",
+                    "the new AC used too much grid power",
                     target_entity_id=assessment.load_entity_id,
                 )
                 return
@@ -377,7 +377,7 @@ class SolarSpenderController:
                 if pending_reports:
                     self._set_state(
                         STATE_WAITING_FEEDBACK,
-                        f"confirmation {len(assessment.votes)}/"
+                        f"check {len(assessment.votes)}/"
                         f"{assessment.sample_count}; waiting for "
                         + ", ".join(sorted(pending_reports)),
                     )
@@ -392,9 +392,9 @@ class SolarSpenderController:
                     else None,
                 )
                 self._record(
-                    f"Confirmation vote {len(assessment.votes)}/"
+                    f"Check {len(assessment.votes)}/"
                     f"{assessment.sample_count} for {assessment.load_entity_id}: "
-                    f"{'headroom' if assessment.votes[-1] else 'no headroom'}"
+                    f"{'pass' if assessment.votes[-1] else 'fail'}"
                 )
                 if not assessment.complete:
                     self._schedule_reconcile(
@@ -402,7 +402,7 @@ class SolarSpenderController:
                     )
                     self._set_state(
                         STATE_WAITING_FEEDBACK,
-                        f"confirmation {len(assessment.votes)}/"
+                        f"check {len(assessment.votes)}/"
                         f"{assessment.sample_count}",
                     )
                     return
@@ -416,19 +416,19 @@ class SolarSpenderController:
                 if assessment.action == "activation" and not assessment.supported:
                     self._mark_unsupported_activation(assessment.load_entity_id)
                     await self._async_shed_one(
-                        "activation failed majority confirmation",
+                        "most checks failed",
                         target_entity_id=assessment.load_entity_id,
                     )
                     return
                 if assessment.action == "recovery" and not assessment.supported:
                     await self._async_shed_one(
-                        "post-restart feedback found no solar opportunity"
+                        "not enough spare solar after restart"
                     )
                     return
                 if not assessment.supported:
                     self._set_state(
                         STATE_SPENDING if self._leases else STATE_MONITORING,
-                        "majority confirmation found no headroom",
+                        "most checks failed",
                     )
                     return
                 self._next_load_not_before = (
@@ -438,7 +438,7 @@ class SolarSpenderController:
                 self._schedule_reconcile(self.config.next_load_delay_minutes * 60)
                 self._set_state(
                     STATE_SPENDING if self._leases else STATE_MONITORING,
-                    "majority confirmation passed; waiting before next AC",
+                    "checks passed; waiting before the next AC",
                 )
                 return
             if self._pending_unsupported_release is not None:
@@ -446,7 +446,7 @@ class SolarSpenderController:
                     self._pending_unsupported_release = None
                 else:
                     await self._async_shed_one(
-                        "releasing unsupported activation",
+                        "turning off the AC that failed its checks",
                         target_entity_id=self._pending_unsupported_release,
                     )
                     return
@@ -456,7 +456,7 @@ class SolarSpenderController:
                 self.surplus_available,
                 self._feedback_assessment is not None,
             ):
-                self._record("Cleared unsupported-load memory after surplus ended")
+                self._record("Reset AC blocks because spare solar ended.")
             shed_reason = owned_load_shed_reason(
                 has_owned_loads=bool(self._leases),
                 source_available=self.surplus_available,
@@ -482,7 +482,7 @@ class SolarSpenderController:
             ):
                 self._set_state(
                     STATE_SPENDING if self._leases else STATE_MONITORING,
-                    "waiting before next AC",
+                    "waiting before the next AC",
                 )
                 return
             self._next_load_not_before = None
@@ -506,7 +506,7 @@ class SolarSpenderController:
             watts = self._power_value(config.grid_entity_id)
             self.raw_source_value = watts
             if watts is None:
-                self._clear_source("grid-flow sensor unavailable")
+                self._clear_source("grid power sensor unavailable")
                 return
             self.source_valid = True
             export_w = watts if config.grid_export_positive else -watts
@@ -519,7 +519,7 @@ class SolarSpenderController:
             consumption_w = self._power_value(config.consumption_entity_id)
             self.raw_source_value = production_w
             if production_w is None or consumption_w is None:
-                self._clear_source("production or consumption sensor unavailable")
+                self._clear_source("solar or home power sensor unavailable")
                 return
             self.source_valid = True
             decision_w = production_w - consumption_w
@@ -541,9 +541,9 @@ class SolarSpenderController:
                 self.source_deficit_w = opportunity.deficit_w
                 self.surplus_available = opportunity.available
                 self.reason = (
-                    "zero-export test opportunity available"
+                    "ready to test one AC"
                     if opportunity.available
-                    else "zero-export deficit or production outside limits"
+                    else "not ready to test an AC"
                 )
                 return
 
@@ -554,7 +554,7 @@ class SolarSpenderController:
             exit_threshold_w=config.exit_threshold_w,
         )
         self.reason = (
-            f"source {'available' if self.surplus_available else 'below threshold'}"
+            f"spare solar {'available' if self.surplus_available else 'too low'}"
         )
 
     def _clear_source(self, reason: str) -> None:
@@ -589,7 +589,7 @@ class SolarSpenderController:
         if config.battery_policy == BATTERY_DISABLED:
             self.battery_direction = "not_configured"
             self.battery_power_w = None
-            return True, "battery policy disabled"
+            return True, "battery ignored"
         status = self._battery_direction()
         charging = status == "charging"
         discharging = status == "discharging"
@@ -600,7 +600,7 @@ class SolarSpenderController:
             return (
                 charging
                 or (soc is not None and soc >= config.battery_full_threshold),
-                "battery gate closed",
+                "battery does not pass the rule",
             )
         if config.battery_policy == BATTERY_FULL_IDLE_FOR_PROBE:
             allowed = (
@@ -610,8 +610,8 @@ class SolarSpenderController:
                 and not discharging
                 and bool(status)
             )
-            return allowed, "battery must be full and idle before probing"
-        return False, "invalid battery policy"
+            return allowed, "battery must be full and idle"
+        return False, "battery rule is invalid"
 
     def _battery_direction(self) -> str:
         if self.config.battery_direction_source == BATTERY_DIRECTION_POWER:
@@ -677,12 +677,12 @@ class SolarSpenderController:
         candidate = self._next_eligible_load()
         if candidate is None:
             no_load_reason = (
-                "remaining loads blocked for current solar opportunity"
+                "remaining ACs are blocked for now"
                 if (
                     self._cycle_memory.blocked_loads
                     or self._cycle_memory.unsupported_combinations
                 )
-                else "no eligible load"
+                else "no AC is ready"
             )
             self._set_state(
                 STATE_SPENDING if self._leases else STATE_MONITORING,
@@ -697,12 +697,12 @@ class SolarSpenderController:
         ):
             self._set_state(
                 STATE_SPENDING if self._leases else STATE_MONITORING,
-                "no load fits headroom",
+                "not enough spare solar for another AC",
             )
             return
         self._set_state(
             STATE_PROBING if self.config.source_type == SOURCE_CURTAILED else STATE_SPENDING,
-            f"activating {candidate.entity_id}: {reason}",
+            f"turning on {candidate.entity_id}: {reason}",
         )
         await self._async_activate_load(candidate)
 
@@ -790,7 +790,7 @@ class SolarSpenderController:
             minimum_on_seconds=load.min_on_seconds,
             baseline_consumption_w=baseline_consumption_w,
         )
-        self._record(f"Awaiting activation confirmation for {load.entity_id}")
+        self._record(f"Turned on {load.entity_id}. Waiting to check it.")
         self._schedule_reconcile(self.config.settling_seconds)
 
     def _confirm_pending_activation(self) -> None:
@@ -808,7 +808,7 @@ class SolarSpenderController:
                 and self._feedback_assessment.load_entity_id == load.entity_id
             ):
                 self._feedback_assessment = None
-            self._record(f"Activation was not confirmed for {load.entity_id}")
+            self._record(f"{load.entity_id} did not turn on.")
             return
         activated_at = datetime.now().astimezone()
         self._leases[load.entity_id] = Lease(
@@ -829,7 +829,7 @@ class SolarSpenderController:
                 self._feedback_assessment.next_not_before,
                 minimum_on_deadline,
             )
-        self._record(f"Activated {load.entity_id}")
+        self._record(f"{load.entity_id} is now owned.")
 
     async def _async_shed_one(
         self,
@@ -843,7 +843,7 @@ class SolarSpenderController:
             target = self._leases.get(target_entity_id)
             if target is None:
                 self._record(
-                    f"Could not release {target_entity_id}: ownership was relinquished"
+                    f"Left {target_entity_id} alone because it is no longer owned."
                 )
                 if self._pending_unsupported_release == target_entity_id:
                     self._pending_unsupported_release = None
@@ -855,7 +855,7 @@ class SolarSpenderController:
             if now >= lease.activated_at + timedelta(seconds=lease.load.min_on_seconds)
         ]
         if not eligible:
-            self._set_state(STATE_SHEDDING, "waiting for minimum-on deadline")
+            self._set_state(STATE_SHEDDING, "waiting for the minimum on time")
             deadlines = [
                 lease.activated_at + timedelta(seconds=lease.load.min_on_seconds)
                 for lease in considered
@@ -876,8 +876,8 @@ class SolarSpenderController:
             if lease is not None and shortfall_w > 0:
                 draw_w = self._current_release_draw_w(lease.load)
                 self._record(
-                    f"Measured shortfall is {round(shortfall_w)} W; selected "
-                    f"{lease.load.entity_id} at "
+                    f"Need to remove {round(shortfall_w)} W. Chose "
+                    f"{lease.load.entity_id}, which uses "
                     f"{round(draw_w) if draw_w is not None else 'unknown'} W"
                 )
         if lease is None:
@@ -888,13 +888,13 @@ class SolarSpenderController:
                 supported=False,
                 expected_draws_w=self._expected_draws(),
             )
-        self._set_state(STATE_SHEDDING, f"releasing {lease.load.entity_id}: {reason}")
+        self._set_state(STATE_SHEDDING, f"turning off {lease.load.entity_id}: {reason}")
         try:
             await self.hass.services.async_call(
                 "climate", "turn_off", {"entity_id": lease.load.entity_id}, blocking=True
             )
         except HomeAssistantError as err:
-            self._record(f"Could not release {lease.load.entity_id}: {err}")
+            self._record(f"Could not turn off {lease.load.entity_id}: {err}")
             self._schedule_reconcile(self.config.settling_seconds)
             return
         await self._async_restore_profile(lease)
@@ -902,7 +902,7 @@ class SolarSpenderController:
         if self._pending_unsupported_release == lease.load.entity_id:
             self._pending_unsupported_release = None
         self._last_off[lease.load.entity_id] = now
-        self._record(f"Released {lease.load.entity_id}: {reason}")
+        self._record(f"Turned off {lease.load.entity_id}: {reason}")
         self._begin_feedback_assessment(
             "release",
             lease.load.entity_id,
@@ -934,7 +934,7 @@ class SolarSpenderController:
             baseline_consumption_w=baseline_consumption_w,
         )
         self._record(
-            f"Confirmation for {load_entity_id}; first reports must be newer than "
+            f"Waiting to check {load_entity_id}. First sensor reports must be after "
             f"{not_before.isoformat()}"
         )
 
@@ -997,8 +997,8 @@ class SolarSpenderController:
             self._cycle_memory.mark_unsupported(entity_id)
         self._pending_unsupported_release = entity_id
         self._record(
-            f"Blocked {'load' if global_block else 'combination'} "
-            f"containing {entity_id} for this solar opportunity"
+            f"Blocked {'AC' if global_block else 'AC group'} "
+            f"containing {entity_id} for now."
         )
 
     async def _async_learn_draw(self, assessment: FeedbackAssessment) -> None:
@@ -1012,8 +1012,8 @@ class SolarSpenderController:
         spread_w = max(samples) - min(samples)
         if observed_w <= 0 or spread_w > max(100.0, observed_w * 0.2):
             self._record(
-                f"Skipped draw learning for {assessment.load_entity_id}: "
-                "household load was not stable"
+                f"Could not learn the power used by {assessment.load_entity_id}: "
+                "home power changed too much."
             )
             return
         now = datetime.now().astimezone()
@@ -1025,8 +1025,8 @@ class SolarSpenderController:
         self._learned_draws[assessment.load_entity_id] = estimate
         await self._learning_store.async_save(self._learned_draws)
         self._record(
-            f"Learned {assessment.load_entity_id} draw near "
-            f"{round(estimate.estimate_w)} W from {estimate.samples} sample(s)"
+            f"{assessment.load_entity_id} uses about "
+            f"{round(estimate.estimate_w)} W based on {estimate.samples} check(s)."
         )
 
     def _capture_profile(self, entity_id: str) -> dict[str, Any]:
@@ -1061,33 +1061,41 @@ class SolarSpenderController:
                 )
             # The previous state is normally off because activation skips ACs
             # already in use. `turn_off` above restores it without re-energizing.
-            self._record(f"Restored profile for {entity_id}")
+            self._record(f"Restored the old settings for {entity_id}.")
         except HomeAssistantError as err:
-            self._record(f"Could not fully restore profile for {entity_id}: {err}")
+            self._record(f"Could not restore all settings for {entity_id}: {err}")
 
     def _relinquish_manual_overrides(self) -> None:
         for entity_id, lease in list(self._leases.items()):
             state = self.hass.states.get(entity_id)
             if state is None or state.state in _INVALID_STATES or state.state == STATE_OFF:
                 self._leases.pop(entity_id, None)
-                self._record(f"Relinquished {entity_id}: turned off externally")
+                self._record(
+                    f"{entity_id} is no longer owned because it was turned off."
+                )
                 continue
             if lease.load.hvac_mode is not None and state.state != lease.load.hvac_mode:
                 self._leases.pop(entity_id, None)
-                self._record(f"Relinquished {entity_id}: HVAC mode changed")
+                self._record(
+                    f"{entity_id} is no longer owned because its mode changed."
+                )
                 continue
             if lease.load.temperature is not None:
                 actual = state.attributes.get(ATTR_TEMPERATURE)
                 if actual is not None and abs(float(actual) - lease.load.temperature) > 0.1:
                     self._leases.pop(entity_id, None)
-                    self._record(f"Relinquished {entity_id}: temperature changed")
+                    self._record(
+                        f"{entity_id} is no longer owned because its temperature changed."
+                    )
                     continue
             if (
                 lease.load.fan_mode is not None
                 and state.attributes.get("fan_mode") != lease.load.fan_mode
             ):
                 self._leases.pop(entity_id, None)
-                self._record(f"Relinquished {entity_id}: fan mode changed")
+                self._record(
+                    f"{entity_id} is no longer owned because its fan changed."
+                )
         if (
             self._feedback_assessment is not None
             and self._feedback_assessment.action == "activation"
@@ -1095,8 +1103,8 @@ class SolarSpenderController:
             and self._pending_activation is None
         ):
             self._record(
-                f"Cancelled confirmation for "
-                f"{self._feedback_assessment.load_entity_id}: no longer owned"
+                f"Stopped checking {self._feedback_assessment.load_entity_id}: "
+                "it is no longer owned."
             )
             self._feedback_assessment = None
         if (
@@ -1150,12 +1158,12 @@ class SolarSpenderController:
             assessment.measurements_w.clear()
             assessment.next_not_before = now
             self._feedback_assessment = assessment
-            self._record(f"{message}; restarting interrupted confirmation")
+            self._record(f"{message}. Restarting the interrupted checks.")
         elif self._resume_requires_recovery and self._leases:
             self._begin_recovery_feedback("post-restart paused leases")
-            self._record(f"{message}; requiring fresh restart-recovery feedback")
+            self._record(f"{message}. Checking the solar sensors again.")
         else:
-            self._record(f"{message}; evaluating current inputs")
+            self._record(f"{message}. Checking current sensor values.")
         self._resume_requires_recovery = False
 
     def _set_state(self, state: str, reason: str) -> None:
@@ -1299,8 +1307,8 @@ class SolarSpenderController:
         )
         if self._discarded_lease_count:
             self._record(
-                f"Did not restore {self._discarded_lease_count} ambiguous "
-                "lease(s); affected ACs were left untouched"
+                f"Could not trust {self._discarded_lease_count} saved AC state(s). "
+                "Those ACs were left alone."
             )
         cycle = data.get("cycle_memory")
         if isinstance(cycle, dict):
@@ -1356,22 +1364,22 @@ class SolarSpenderController:
         )
         can_be_owned = False
         if owned:
-            ownership_reason = "Owned by Solar Spender"
+            ownership_reason = "Solar Spender turned this AC on"
         elif (
             self._pending_activation is not None
             and self._pending_activation[0].entity_id == load.entity_id
         ):
-            ownership_reason = "Solar Spender is starting this AC"
+            ownership_reason = "Solar Spender is turning this AC on"
         elif not load.enabled:
-            ownership_reason = "Disabled in Solar Spender"
+            ownership_reason = "Turned off in Solar Spender"
         elif state is None or state_value in _INVALID_STATES:
-            ownership_reason = "Unavailable; Solar Spender cannot own it"
+            ownership_reason = "AC is unavailable"
         elif state_value != STATE_OFF:
             ownership_reason = (
-                "Already running or changed manually; Solar Spender does not own it"
+                "Already running or changed by someone else"
             )
         elif blocked_for_cycle:
-            ownership_reason = "Blocked for this solar opportunity"
+            ownership_reason = "Blocked for now"
         else:
             last_off = self._last_off.get(load.entity_id)
             minimum_off_until = (
@@ -1384,11 +1392,11 @@ class SolarSpenderController:
                 and datetime.now().astimezone() < minimum_off_until
             ):
                 ownership_reason = (
-                    "Waiting for minimum-off time before it can be owned"
+                    "Waiting for its minimum off time"
                 )
             else:
                 can_be_owned = True
-                ownership_reason = "Available for Solar Spender to own"
+                ownership_reason = "Ready"
         return {
             "entity_id": load.entity_id,
             "enabled": load.enabled,

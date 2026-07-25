@@ -103,7 +103,7 @@ test("disabled status cards describe inactive and unconfigured states honestly",
 
   assert.deepEqual(cards.controller, {
     value: "Disabled",
-    detail: "Automation is disabled. Solar Spender will not start or release ACs.",
+    detail: "Solar Spender will not turn ACs on or off.",
   });
   assert.equal(cards.surplus.value, "Unknown");
   assert.equal(cards.battery.value, "Not configured");
@@ -123,7 +123,7 @@ test("headroom remains visible while automation is disabled", () => {
     { battery_policy: "disabled" },
   );
 
-  assert.equal(cards.surplus.value, "Available");
+  assert.equal(cards.surplus.value, "Yes");
 });
 
 test("battery charging removes waste headroom without hiding source opportunity", () => {
@@ -139,22 +139,22 @@ test("battery charging removes waste headroom without hiding source opportunity"
     { battery_policy: "charging_or_soc" },
   );
 
-  assert.equal(cards.surplus.value, "Unavailable");
-  assert.match(cards.surplus.detail, /battery still has first claim/i);
+  assert.equal(cards.surplus.value, "No");
+  assert.match(cards.surplus.detail, /battery gets the spare solar first/i);
 });
 
 test("source and battery modes explain the selected behavior", () => {
   assert.match(sourceModeDescription("curtailed_production"), /zero-export/i);
-  assert.match(sourceModeDescription("curtailed_production"), /one.?AC/i);
-  assert.match(sourceModeDescription("curtailed_production"), /does not prove/i);
-  assert.match(sourceModeDescription("grid_flow"), /live export/i);
-  assert.match(batteryPolicyDescription("full_idle_for_probe"), /idle threshold/i);
+  assert.match(sourceModeDescription("curtailed_production"), /one AC/i);
+  assert.match(sourceModeDescription("curtailed_production"), /cannot be measured/i);
+  assert.match(sourceModeDescription("grid_flow"), /grid meter/i);
+  assert.match(batteryPolicyDescription("full_idle_for_probe"), /full and idle/i);
 });
 
 test("load ownership presentation distinguishes eligible, disabled, and manual loads", () => {
   assert.deepEqual(
     loadOwnershipPresentation({ can_be_owned: true, enabled: true, owned: false }),
-    { style: "primary", label: "Can be owned" },
+    { style: "primary", label: "Ready" },
   );
   assert.equal(
     loadOwnershipPresentation({ can_be_owned: false, enabled: false, owned: false }).label,
@@ -183,12 +183,12 @@ test("enabled status cards use readable controller state labels", () => {
     { battery_policy: "charging_or_soc" },
   );
 
-  assert.equal(cards.controller.value, "Waiting for feedback");
-  assert.equal(cards.battery.value, "Blocking");
+  assert.equal(cards.controller.value, "Checking");
+  assert.equal(cards.battery.value, "Block");
   assert.equal(cards.feedback.value, "Checking 2 of 3");
   assert.equal(
     cards.feedback.detail,
-    "Yes 1 · No 0 · Waiting for sensor.grid_power",
+    "Pass 1 · Fail 0 · Waiting: sensor.grid_power",
   );
 });
 
@@ -210,7 +210,7 @@ test("timed pause freezes every live decision card", () => {
   assert.equal(cards.surplus.value, "Frozen");
   assert.equal(cards.battery.value, "Frozen");
   assert.equal(cards.feedback.value, "Paused");
-  assert.match(cards.feedback.detail, /fresh reports/i);
+  assert.match(cards.feedback.detail, /restart after resume/i);
 });
 
 test("configured battery condition is inactive while Solar Spender is disabled", () => {
@@ -226,7 +226,7 @@ test("configured battery condition is inactive while Solar Spender is disabled",
 
   assert.deepEqual(cards.battery, {
     value: "Inactive",
-    detail: "The configured battery condition is evaluated only while Solar Spender is enabled.",
+    detail: "Battery checks run only when Solar Spender is enabled.",
   });
 });
 
@@ -244,21 +244,20 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /feedback_sample_count: 3/);
   assert.doesNotMatch(source, /utility/i);
   assert.doesNotMatch(source, /Binary headroom/);
-  assert.match(source, /priority breaks ties and controls fallback order/i);
+  assert.match(source, /Lower numbers start first/i);
   assert.match(source, /data-load-enabled-index/);
   assert.match(source, /battery_power_entity_id/);
-  assert.match(source, /Maximum deficit to start testing/);
-  assert.match(source, /Deficit that stops testing/);
+  assert.match(source, /Start test below/);
+  assert.match(source, /Stop test above/);
   assert.match(source, /minimum_production_w/);
-  assert.match(source, /Deficit = consumption − production/);
-  assert.match(source, /Measured headroom = production − consumption/);
-  assert.match(source, /Idle threshold magnitude/);
-  assert.match(source, /threshold is always positive/i);
+  assert.match(source, /Gap = home use − solar/);
+  assert.match(source, /Spare solar = solar − home use/);
+  assert.match(source, /Idle range/);
   assert.match(source, /data-load-power-index/);
-  assert.match(source, /Live AC power entity/);
-  assert.match(source, /Waste headroom/);
-  assert.match(source, /lease\(s\) recovered after restart or reload/);
-  assert.match(source, /ambiguous lease\(s\) were not restored/);
+  assert.match(source, /AC power sensor/);
+  assert.match(source, /Spare solar/);
+  assert.match(source, /owned AC\(s\) restored after restart/);
+  assert.match(source, /saved AC state\(s\) could not be trusted/);
   assert.match(source, /Pause 5 min/);
   assert.match(source, /solar_spender\/control\/set_pause/);
   assert.match(source, /Resume now/);

@@ -15,11 +15,11 @@ def owned_load_shed_reason(
     if not has_owned_loads:
         return None
     if not source_available:
-        return "surplus unavailable"
+        return "not enough spare solar"
     if battery_direction == "discharging":
-        return "battery discharging; owned load is no longer solar-supported"
+        return "battery is discharging"
     if probing and not battery_allowed:
-        return "battery gate closed during probe"
+        return "battery blocked the test"
     return None
 
 

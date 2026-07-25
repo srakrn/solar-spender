@@ -54,7 +54,7 @@ async def websocket_get_status(
     """Return live, read-only controller status."""
     controller = _controller(hass)
     if controller is None:
-        connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
+        connection.send_error(msg["id"], "not_configured", "Solar Spender is not set up")
         return
     connection.send_result(msg["id"], controller.status())
 
@@ -68,11 +68,11 @@ async def websocket_get_config(
 ) -> None:
     """Return the current configuration to an administrator."""
     if not connection.user.is_admin:
-        connection.send_error(msg["id"], "unauthorized", "Administrator access is required")
+        connection.send_error(msg["id"], "unauthorized", "Admin access is required")
         return
     entry = _entry(hass)
     if entry is None:
-        connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
+        connection.send_error(msg["id"], "not_configured", "Solar Spender is not set up")
         return
     connection.send_result(
         msg["id"],
@@ -91,11 +91,11 @@ async def websocket_update_config(
 ) -> None:
     """Validate and persist complete panel configuration."""
     if not connection.user.is_admin:
-        connection.send_error(msg["id"], "unauthorized", "Administrator access is required")
+        connection.send_error(msg["id"], "unauthorized", "Admin access is required")
         return
     entry = _entry(hass)
     if entry is None:
-        connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
+        connection.send_error(msg["id"], "not_configured", "Solar Spender is not set up")
         return
     options = current_options({**DEFAULT_OPTIONS, **msg["options"]})
     try:
@@ -128,11 +128,11 @@ async def websocket_set_pause(
 ) -> None:
     """Temporarily ignore all controller inputs, or resume with zero minutes."""
     if not connection.user.is_admin:
-        connection.send_error(msg["id"], "unauthorized", "Administrator access is required")
+        connection.send_error(msg["id"], "unauthorized", "Admin access is required")
         return
     controller = _controller(hass)
     if controller is None:
-        connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
+        connection.send_error(msg["id"], "not_configured", "Solar Spender is not set up")
         return
     try:
         await controller.async_set_pause(msg["minutes"])
@@ -186,7 +186,7 @@ def _validate_configured_entities(
 def _require_entity(hass: HomeAssistant, entity_id: str) -> State:
     state = hass.states.get(entity_id)
     if state is None:
-        raise ConfigurationError(f"{entity_id} does not exist")
+        raise ConfigurationError(f"{entity_id} was not found.")
     return state
 
 
@@ -200,7 +200,7 @@ def _validate_power_entity(hass: HomeAssistant, entity_id: str) -> None:
         or attributes.get("unit_of_measurement") not in {"W", "kW"}
     ):
         raise ConfigurationError(
-            f"{entity_id} must be a measurement power sensor using W or kW"
+            f"{entity_id} must be a power sensor using W or kW."
         )
 
 
@@ -214,7 +214,7 @@ def _validate_battery_soc_entity(hass: HomeAssistant, entity_id: str) -> None:
         or attributes.get("unit_of_measurement") != "%"
     ):
         raise ConfigurationError(
-            f"{entity_id} must be a measurement battery sensor using %"
+            f"{entity_id} must be a battery level sensor using %."
         )
 
 
@@ -226,7 +226,7 @@ def _validate_battery_status_entity(
     if state.entity_id.startswith("binary_sensor."):
         if attributes.get("device_class") != "battery_charging":
             raise ConfigurationError(
-                f"{state.entity_id} must use the battery_charging device class"
+                f"{state.entity_id} must be a battery charging sensor."
             )
         return
     known_states = {
@@ -242,7 +242,7 @@ def _validate_battery_status_entity(
         state.state.lower() in known_states or options.intersection(known_states)
     ):
         raise ConfigurationError(
-            f"{state.entity_id} must report charging, discharging, or idle status"
+            f"{state.entity_id} must show charging, discharging, or idle."
         )
 
 
@@ -257,29 +257,33 @@ def _validate_climate_capabilities(
             continue
         state = hass.states.get(load.entity_id)
         if state is None:
-            raise ConfigurationError(f"{load.entity_id} does not exist")
+            raise ConfigurationError(f"{load.entity_id} was not found.")
         hvac_modes = set(state.attributes.get("hvac_modes", []))
         if load.hvac_mode is not None and load.hvac_mode not in hvac_modes:
             raise ConfigurationError(
-                f"{load.entity_id} does not support HVAC mode {load.hvac_mode}"
+                f"{load.entity_id} does not support {load.hvac_mode} mode."
             )
         if load.fan_mode is not None and load.fan_mode not in set(
             state.attributes.get("fan_modes", [])
         ):
             raise ConfigurationError(
-                f"{load.entity_id} does not support fan mode {load.fan_mode}"
+                f"{load.entity_id} does not support {load.fan_mode} fan mode."
             )
         if load.temperature is not None:
             min_temp = state.attributes.get("min_temp")
             max_temp = state.attributes.get("max_temp")
             if min_temp is not None and load.temperature < float(min_temp):
-                raise ConfigurationError(f"{load.entity_id} target is below its minimum")
+                raise ConfigurationError(
+                    f"{load.entity_id} temperature is too low."
+                )
             if max_temp is not None and load.temperature > float(max_temp):
-                raise ConfigurationError(f"{load.entity_id} target is above its maximum")
+                raise ConfigurationError(
+                    f"{load.entity_id} temperature is too high."
+                )
             step = state.attributes.get("target_temp_step")
             if min_temp is not None and step is not None:
                 increments = (load.temperature - float(min_temp)) / float(step)
                 if abs(increments - round(increments)) > 0.000001:
                     raise ConfigurationError(
-                        f"{load.entity_id} target does not match its temperature step"
+                        f"{load.entity_id} does not support that temperature."
                     )

@@ -33,25 +33,25 @@ export function sourceConfigurationVisibility(sourceType) {
 export function sourceModeDescription(sourceType) {
   return {
     grid_flow:
-      "Best when your grid meter reports live export. Solar Spender uses only export above your reserve and margins.",
+      "Use your grid meter. Solar Spender uses export above the amount you keep.",
     production_consumption:
-      "Use when production minus whole-home consumption is directly measurable spare power. Larger positive values are better, so entry is higher than exit.",
+      "Use solar production minus home use. A bigger result means more spare solar.",
     curtailed_production:
-      "For zero-export systems where unused capacity is hidden. A small consumption-minus-production deficit permits a cautious one-AC test; it does not prove excess power.",
-  }[sourceType] || "Choose how Solar Spender detects spare solar power.";
+      "For zero-export systems. Solar Spender tests one AC at a time because spare solar cannot be measured directly.",
+  }[sourceType] || "Choose how to measure spare solar.";
 }
 
 export function batteryPolicyDescription(policy) {
   return {
     disabled:
-      "Battery state does not block new AC starts.",
+      "Ignore the battery.",
     require_charging:
-      "Start another AC only while the battery is measurably charging.",
+      "Start an AC only while the battery is charging.",
     charging_or_soc:
-      "Start another AC while charging, or after battery state of charge reaches the configured threshold.",
+      "Start an AC while charging or when the battery reaches the set level.",
     full_idle_for_probe:
-      "Before testing hidden solar capacity, require a full battery with power flow inside the idle threshold.",
-  }[policy] || "Choose how battery state affects new AC starts.";
+      "For zero-export testing, start an AC only when the battery is full and idle.",
+  }[policy] || "Choose when the battery allows a new AC.";
 }
 
 export function batteryConfigurationVisibility(policy, directionSource = "power") {
@@ -72,9 +72,9 @@ export function batteryConfigurationVisibility(policy, directionSource = "power"
 export function loadOwnershipPresentation(load) {
   if (load.owned) return { style: "success", label: "Owned" };
   if (!load.enabled) return { style: "secondary", label: "Disabled" };
-  if (load.can_be_owned) return { style: "primary", label: "Can be owned" };
+  if (load.can_be_owned) return { style: "primary", label: "Ready" };
   if (load.blocked_for_cycle) {
-    return { style: "warning", label: "Blocked this cycle" };
+    return { style: "warning", label: "Blocked for now" };
   }
   return { style: "secondary", label: "Not owned" };
 }
@@ -83,14 +83,14 @@ export function statusPresentations(status, options) {
   const enabled = Boolean(status?.enabled);
   const paused = Boolean(status?.paused);
   const stateLabels = {
-    blocked_battery: "Blocked by battery",
+    blocked_battery: "Battery blocked",
     disabled: "Disabled",
-    monitoring: "Monitoring",
+    monitoring: "Watching",
     paused: "Paused",
     probing: "Testing one AC",
-    shedding: "Releasing loads",
-    spending: "Spending solar",
-    waiting_feedback: "Waiting for feedback",
+    shedding: "Turning off an AC",
+    spending: "Using solar",
+    waiting_feedback: "Checking",
   };
   const batteryConfigured = options?.battery_policy !== "disabled";
 
@@ -99,83 +99,83 @@ export function statusPresentations(status, options) {
       ? {
           value: "Paused",
           detail: status?.paused_until
-            ? `Ignoring all input changes until ${new Date(status.paused_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Owned ACs stay untouched.`
-            : "Ignoring all input changes. Owned ACs stay untouched.",
+            ? `Paused until ${new Date(status.paused_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. ACs stay as they are.`
+            : "Paused. ACs stay as they are.",
         }
       : enabled
       ? {
           value: stateLabels[status?.state] || "Starting",
-          detail: status?.reason || "Evaluating the configured source.",
+          detail: status?.reason || "Checking for spare solar.",
         }
       : {
           value: "Disabled",
-          detail: "Automation is disabled. Solar Spender will not start or release ACs.",
+          detail: "Solar Spender will not turn ACs on or off.",
         },
     surplus: paused
       ? {
           value: "Frozen",
-          detail: "Source changes during the pause do not update Solar Spender's decision.",
+          detail: "Not checked while paused.",
         }
       : status?.source_valid
       ? {
-          value: status?.waste_headroom_available ? "Available" : "Unavailable",
+          value: status?.waste_headroom_available ? "Yes" : "No",
           detail: status?.surplus_available
             && !status?.waste_headroom_available
-            ? "The solar source qualifies, but the configured battery still has first claim on the power."
+            ? "The battery gets the spare solar first."
             : null,
         }
       : {
           value: "Unknown",
-          detail: "The configured source is unavailable or incomplete.",
+          detail: "The solar sensors are missing or unavailable.",
         },
     battery: !batteryConfigured
       ? {
           value: "Not configured",
-          detail: "No battery condition is applied to new activations.",
+          detail: "The battery is ignored.",
         }
       : !enabled
         ? {
             value: "Inactive",
-            detail: "The configured battery condition is evaluated only while Solar Spender is enabled.",
+            detail: "Battery checks run only when Solar Spender is enabled.",
           }
         : paused
           ? {
               value: "Frozen",
-              detail: "Battery changes are ignored until Solar Spender resumes.",
+              detail: "Not checked while paused.",
             }
           : {
-            value: status?.battery_allowed ? "Open" : "Blocking",
+            value: status?.battery_allowed ? "Pass" : "Block",
             detail: `${status?.battery_allowed
-              ? "The configured battery condition permits a new activation."
-              : "New activations are paused by the battery condition."}`
+              ? "The battery allows a new AC."
+              : "The battery does not allow a new AC."}`
               + (status?.battery_direction
-                ? ` Direction: ${status.battery_direction}.`
+                ? ` It is ${status.battery_direction}.`
                 : "")
               + (typeof status?.battery_power_w === "number"
-                ? ` Normalized battery power: ${Math.round(status.battery_power_w)} W (positive is charging).`
+                ? ` Battery power: ${Math.round(status.battery_power_w)} W.`
                 : ""),
           },
     feedback: !enabled
       ? {
           value: "Idle",
-          detail: "Fresh feedback is required only after Solar Spender changes a load.",
+          detail: "Nothing to check.",
         }
       : paused
         ? {
             value: "Paused",
-            detail: "Any interrupted confirmation was discarded; fresh reports will be required after resume.",
+            detail: "Checks will restart after resume.",
           }
         : status?.feedback?.waiting
         ? {
             value: `Checking ${(status.feedback.votes || []).length + 1} of ${status.feedback.sample_count || 1}`,
-            detail: `Yes ${(status.feedback.votes || []).filter(Boolean).length} · No ${(status.feedback.votes || []).filter((vote) => !vote).length}`
+            detail: `Pass ${(status.feedback.votes || []).filter(Boolean).length} · Fail ${(status.feedback.votes || []).filter((vote) => !vote).length}`
               + ((status.feedback.pending_entities || []).length
-                ? ` · Waiting for ${(status.feedback.pending_entities || []).join(", ")}`
+                ? ` · Waiting: ${(status.feedback.pending_entities || []).join(", ")}`
                 : ""),
           }
         : {
             value: "Ready",
-            detail: "No load change is waiting for source confirmation.",
+            detail: "Nothing to check.",
           },
   };
 }
