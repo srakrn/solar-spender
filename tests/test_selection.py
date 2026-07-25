@@ -1,4 +1,4 @@
-"""Regression tests for simple priority-only load ordering."""
+"""Regression tests for deterministic activation and deficit-aware release."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ SPEC.loader.exec_module(SELECTION)
 
 
 class PrioritySelectionTests(unittest.TestCase):
-    """Priority is the only preference, with stable list-order ties."""
+    """Priority controls activation and breaks release-selection ties."""
 
     def test_activation_uses_lowest_priority_number(self) -> None:
         loads = [
@@ -59,6 +59,52 @@ class PrioritySelectionTests(unittest.TestCase):
         selected = SELECTION.first_to_release(
             loads,
             lambda load: load["priority"],
+        )
+
+        self.assertEqual(selected["name"], "release")
+
+    def test_release_uses_smallest_load_that_covers_shortfall(self) -> None:
+        loads = [
+            {"name": "large", "priority": 100, "draw": 900},
+            {"name": "best", "priority": 10, "draw": 500},
+            {"name": "small", "priority": 200, "draw": 200},
+        ]
+
+        selected = SELECTION.best_to_release_for_shortfall(
+            loads,
+            draw_w=lambda load: load["draw"],
+            shortfall_w=450,
+            priority=lambda load: load["priority"],
+        )
+
+        self.assertEqual(selected["name"], "best")
+
+    def test_release_uses_largest_contributor_when_none_covers_shortfall(self) -> None:
+        loads = [
+            {"name": "small", "priority": 200, "draw": 200},
+            {"name": "large", "priority": 10, "draw": 500},
+        ]
+
+        selected = SELECTION.best_to_release_for_shortfall(
+            loads,
+            draw_w=lambda load: load["draw"],
+            shortfall_w=700,
+            priority=lambda load: load["priority"],
+        )
+
+        self.assertEqual(selected["name"], "large")
+
+    def test_release_falls_back_to_priority_without_a_measured_shortfall(self) -> None:
+        loads = [
+            {"name": "keep", "priority": 10, "draw": 500},
+            {"name": "release", "priority": 100, "draw": None},
+        ]
+
+        selected = SELECTION.best_to_release_for_shortfall(
+            loads,
+            draw_w=lambda load: load["draw"],
+            shortfall_w=0,
+            priority=lambda load: load["priority"],
         )
 
         self.assertEqual(selected["name"], "release")

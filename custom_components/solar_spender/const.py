@@ -13,7 +13,7 @@ PLATFORMS: Final[list[Platform]] = [
     Platform.SWITCH,
 ]
 
-PANEL_VERSION: Final = "0.4.1"
+PANEL_VERSION: Final = "0.5.0"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"

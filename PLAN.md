@@ -249,6 +249,7 @@ Each entry contains:
 - desired target temperature (optional);
 - desired fan mode (optional);
 - optional expected power;
+- optional live W/kW power entity for the individual AC;
 - minimum-on duration;
 - minimum-off duration;
 - enabled flag.
@@ -280,6 +281,14 @@ Start with a deterministic greedy controller, not a combinatorial optimizer:
    over a settling window.
 7. Keep it if supported; otherwise release it safely and add a retry backoff.
 8. Re-rank before every subsequent activation.
+
+When shedding and a reliable current shortfall is observable, prefer the
+smallest minimum-on-eligible owned AC whose live draw (or conservative estimate)
+covers that shortfall. If no single AC covers it, release the largest measured
+contributor, obtain fresh source feedback, and decide again. Priority breaks
+equal-power ties and remains the fallback when the shortfall or load draws are
+unknown. This avoids releasing a large AC when a smaller one is enough without
+attempting simultaneous multi-load changes.
 
 Learning must attach uncertainty and reject samples when unrelated household
 load changed materially during the observation window. Inverter AC draw varies
@@ -347,9 +356,11 @@ Clarifications:
   and block that load for the rest of the current opportunity. Removing it and
   seeing headroom return does not re-arm it. Clear the block only after fresh
   feedback observes no surplus while no load is owned.
-- On loss, release the lowest-priority owned load as soon as its minimum-on time
-  allows. Confirm the change and wait for fresh post-settling feedback before
-  another.
+- On loss, compare the measured production/grid shortfall with live per-AC
+  power sensors or conservative draw estimates. Release one eligible AC that
+  closes the gap with the least overshoot, or the largest contributor if no
+  single AC is enough. Confirm the change and wait for fresh post-settling
+  feedback before another.
 - If surplus returns while waiting for minimum-on eligibility, cancel shedding.
 - A load still inside minimum-on or minimum-off time remains ineligible and the
   controller reports its deadline.
@@ -562,8 +573,8 @@ The release is not acceptable until all of these are automated:
     back.
 20. An unobservable probe stops further activation and reports its reason.
 21. Overlapping unrelated demand invalidates a marginal-power learning sample.
-22. Loss of surplus releases the lowest-priority owned AC whose minimum-on time
-    has elapsed.
+22. With a reliable measured shortfall, shedding chooses the smallest eligible
+    owned AC that covers it, or the largest contributor when none does.
 23. If all owned ACs are inside minimum-on time, no release occurs and the
     earliest eligibility deadline is scheduled.
 24. Surplus recovery while waiting cancels the pending release.

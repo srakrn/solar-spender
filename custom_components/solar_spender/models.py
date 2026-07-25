@@ -62,6 +62,7 @@ class LoadConfig:
     temperature: float | None
     fan_mode: str | None
     expected_power_w: float | None
+    power_entity_id: str
     min_on_seconds: int
     min_off_seconds: int
     enabled: bool
@@ -82,8 +83,17 @@ class LoadConfig:
         expected_power_w = value.get("expected_power_w")
         if expected_power_w is not None:
             expected_power_w = float(expected_power_w)
-            if expected_power_w <= 0:
-                raise ConfigurationError("expected_power_w must be greater than zero")
+            if not isfinite(expected_power_w) or expected_power_w <= 0:
+                raise ConfigurationError(
+                    "expected_power_w must be finite and greater than zero"
+                )
+        power_entity_id = str(value.get("power_entity_id") or "")
+        if power_entity_id:
+            power_entity_id = cv.entity_id(power_entity_id)
+            if not power_entity_id.startswith("sensor."):
+                raise ConfigurationError(
+                    "load power_entity_id must use the sensor domain"
+                )
         min_on_seconds = int(value.get("min_on_seconds", 300))
         min_off_seconds = int(value.get("min_off_seconds", 900))
         if min_on_seconds < 0 or min_off_seconds < 0:
@@ -95,6 +105,7 @@ class LoadConfig:
             temperature=temperature,
             fan_mode=fan_mode,
             expected_power_w=expected_power_w,
+            power_entity_id=power_entity_id,
             min_on_seconds=min_on_seconds,
             min_off_seconds=min_off_seconds,
             enabled=bool(value.get("enabled", True)),

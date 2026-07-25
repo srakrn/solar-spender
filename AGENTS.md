@@ -238,8 +238,11 @@ These are safety requirements, not implementation suggestions:
   before every activation service call.
 - Re-check ownership and minimum on-time just before every release service call.
 - One failed load must not stop reconciliation of other loads.
-- Use deterministic priority order. Activate highest priority first and release
-  lowest priority first; break ties by stable configuration order.
+- Use deterministic priority order for activation. For shedding with a reliable
+  measured shortfall and per-load draw, release the smallest eligible owned load
+  that covers the shortfall; if none covers it, release the largest contributor.
+  Use lowest user priority and stable configuration order as tie-breakers or as
+  the fallback when power information is unavailable.
 - Activate one load at a time, confirm its resulting state, and wait for fresh
   post-settling feedback before activating another.
 - In curtailed-production mode, never activate a second probe until the first
@@ -262,9 +265,10 @@ These are safety requirements, not implementation suggestions:
   lower maximum deficit, remain latched below the higher exit deficit, and
   require `entry_deficit < exit_deficit`.
 - Invalid source data clears the surplus latch.
-- When surplus is lost, release the lowest-priority owned load whose minimum-on
-  time has elapsed. Confirm it, then wait for fresh post-settling feedback
-  before re-evaluating.
+- When surplus is lost, use the measured production deficit or grid shortfall
+  and live per-load power where available to select one eligible owned load.
+  Confirm its release, then wait for fresh post-settling feedback before
+  re-evaluating.
 - If every owned load is still inside minimum-on time, schedule reconciliation
   for the earliest eligibility deadline.
 - If surplus returns before release, cancel the pending reconciliation.
@@ -325,9 +329,9 @@ Required configuration:
   sign and idle threshold, SOC threshold, and normalized charging/discharging
   state mappings;
 - ordered AC definitions with entity ID, priority, optional HVAC mode, optional
-  target temperature, optional fan mode, optional expected marginal power, and
-  minimum on/off durations. `dry` with no temperature is a
-  valid profile.
+  target temperature, optional fan mode, optional expected marginal power,
+  optional live power entity, and minimum on/off durations. `dry` with no
+  temperature is a valid profile.
 
 Validate entity domain, supported HVAC and fan modes, temperature range/step,
 units, duplicate IDs, non-negative durations, sensible threshold ordering, and

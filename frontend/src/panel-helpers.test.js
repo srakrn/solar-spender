@@ -6,6 +6,7 @@ import {
   applySelectorValue,
   batteryConfigurationVisibility,
   batteryPolicyDescription,
+  constrainNumberValue,
   loadOwnershipPresentation,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
@@ -38,6 +39,12 @@ test("selector changes are reflected immediately in the displayed control", () =
   reflectSelectorValue(selector, "sensor.grid_power");
 
   assert.equal(selector.value, "sensor.grid_power");
+});
+
+test("number selectors reject values outside their configured range", () => {
+  assert.equal(constrainNumberValue(-1000, 0, 1000000, 50), 50);
+  assert.equal(constrainNumberValue(120, 0, 1000000, 50), 120);
+  assert.equal(constrainNumberValue(101, 0, 100, 98), 98);
 });
 
 test("live hass updates do not reload an initialized or loading panel", () => {
@@ -198,7 +205,7 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /feedback_sample_count: 3/);
   assert.doesNotMatch(source, /utility/i);
   assert.doesNotMatch(source, /Binary headroom/);
-  assert.match(source, /Equal priorities follow the AC list order/);
+  assert.match(source, /priority breaks ties and controls fallback order/i);
   assert.match(source, /data-load-enabled-index/);
   assert.match(source, /battery_power_entity_id/);
   assert.match(source, /Maximum deficit to start testing/);
@@ -206,6 +213,10 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /minimum_production_w/);
   assert.match(source, /Deficit = consumption − production/);
   assert.match(source, /Measured headroom = production − consumption/);
+  assert.match(source, /Idle threshold magnitude/);
+  assert.match(source, /threshold is always positive/i);
+  assert.match(source, /data-load-power-index/);
+  assert.match(source, /Live AC power entity/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {

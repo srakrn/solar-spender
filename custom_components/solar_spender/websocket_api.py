@@ -129,6 +129,10 @@ def _validate_configured_entities(
         if config.consumption_entity_id:
             _validate_power_entity(hass, config.consumption_entity_id)
 
+    for load in config.loads:
+        if load.enabled and load.power_entity_id:
+            _validate_power_entity(hass, load.power_entity_id)
+
     if config.battery_policy == BATTERY_DISABLED:
         return
     if (

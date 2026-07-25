@@ -46,7 +46,7 @@ from .feedback import (
     append_bounded_event,
 )
 from .models import LoadConfig, SolarSpenderConfig
-from .selection import first_to_activate, first_to_release
+from .selection import best_to_release_for_shortfall, first_to_activate
 from .source import (
     observable_surplus_available,
     zero_export_opportunity_available,
@@ -190,6 +190,7 @@ class SolarSpenderController:
             config.battery_status_entity_id,
             config.battery_power_entity_id,
             *(load.entity_id for load in config.loads),
+            *(load.power_entity_id for load in config.loads),
         }
         return {value for value in values if value}
 
@@ -747,10 +748,23 @@ class SolarSpenderController:
             if deadlines:
                 self._schedule_reconcile(max(0, (min(deadlines) - now).total_seconds()))
             return
-        lease = eligible[0] if target_entity_id is not None else first_to_release(
-            eligible,
-            lambda item: item.load.priority,
-        )
+        if target_entity_id is not None:
+            lease = eligible[0]
+        else:
+            shortfall_w = self._release_shortfall_w()
+            lease = best_to_release_for_shortfall(
+                eligible,
+                draw_w=lambda item: self._current_release_draw_w(item.load),
+                shortfall_w=shortfall_w,
+                priority=lambda item: item.load.priority,
+            )
+            if lease is not None and shortfall_w > 0:
+                draw_w = self._current_release_draw_w(lease.load)
+                self._record(
+                    f"Measured shortfall is {round(shortfall_w)} W; selected "
+                    f"{lease.load.entity_id} at "
+                    f"{round(draw_w) if draw_w is not None else 'unknown'} W"
+                )
         if lease is None:
             return
         if block_for_cycle:
@@ -822,6 +836,20 @@ class SolarSpenderController:
             )
             for load in self.config.loads
         }
+
+    def _current_release_draw_w(self, load: LoadConfig) -> float | None:
+        """Prefer a valid non-negative AC draw, then use its estimate."""
+        if load.power_entity_id:
+            live_w = self._power_value(load.power_entity_id)
+            if live_w is not None and live_w >= 0:
+                return live_w
+        return self._expected_draws().get(load.entity_id)
+
+    def _release_shortfall_w(self) -> float:
+        """Return the currently observable watts that load removal should cover."""
+        if self.config.source_type == SOURCE_CURTAILED:
+            return max(0.0, self.source_deficit_w or 0.0)
+        return max(0.0, -(self.headroom_w or 0.0))
 
     def _combination_draw_w(self, entity_ids: frozenset[str]) -> float | None:
         draws = self._expected_draws()
@@ -1038,6 +1066,8 @@ class SolarSpenderController:
             "effective_expected_power_w": self._expected_draws().get(
                 load.entity_id
             ),
+            "current_power_w": self._current_release_draw_w(load),
+            "power_entity_id": load.power_entity_id,
             "learned_draw_samples": (
                 self._learned_draws[load.entity_id].samples
                 if load.entity_id in self._learned_draws

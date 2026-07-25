@@ -56,6 +56,9 @@ valid source and load options are saved and automation is enabled.
   are tracked through Home Assistant's filtered `state_reported` event.
 - A load rejected by fresh feedback is released safely and blocked until that
   solar opportunity genuinely ends.
+- Each AC may use a conservative watt estimate, an optional live W/kW power
+  sensor, or both. When a measured deficit requires shedding, Solar Spender
+  prefers the smallest eligible AC that covers the gap and then re-measures.
 - Supported and failed AC combinations form a temporary capacity range for the
   current solar opportunity. Stable marginal-draw observations are retained as
   conservative, expiring feasibility hints.

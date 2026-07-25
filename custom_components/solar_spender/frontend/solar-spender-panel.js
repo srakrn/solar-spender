@@ -19,6 +19,12 @@ function applySelectorValue(options, key, value) {
 function reflectSelectorValue(selector, value) {
   selector.value = value;
 }
+function constrainNumberValue(value, min, max, previousValue) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return previousValue;
+  if (numeric < min || numeric > max) return previousValue;
+  return numeric;
+}
 function sourceConfigurationVisibility(sourceType) {
   return {
     grid: sourceType === "grid_flow",
@@ -170,7 +176,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.4.1";
+var PANEL_VERSION = "0.5.0";
 var KEEP_CURRENT = "__keep_current__";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
@@ -412,7 +418,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
           options.exit_threshold_w = lower;
         }
         this._options = options;
-        if (key === "source_type" || key === "battery_policy" || key === "battery_direction_source") {
+        if (key === "source_type" || key === "battery_policy" || key === "battery_direction_source" || key === "battery_power_charging_positive") {
           this._render();
         }
       });
@@ -425,10 +431,16 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === void 0 || value === null || value === "") return;
-        reflectSelectorValue(selector, Number(value));
+        const constrained = constrainNumberValue(
+          value,
+          Number(selector.dataset.min),
+          Number(selector.dataset.max),
+          this._options[key]
+        );
+        reflectSelectorValue(selector, constrained);
         this._options = {
           ...this._options,
-          [key]: Number(value)
+          [key]: constrained
         };
       });
     });
@@ -462,6 +474,18 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         this._render();
       });
     });
+    this._shadow.querySelectorAll("ha-selector[data-load-power-index]").forEach((selector) => {
+      const index = Number(selector.dataset.loadPowerIndex);
+      const load = this._options.loads[index] || {};
+      selector.hass = this._hass;
+      selector.selector = this._entitySelector("load_power_entity_id");
+      selector.value = load.power_entity_id || "";
+      selector.addEventListener("value-changed", (event) => {
+        const value = event.detail?.value || "";
+        reflectSelectorValue(selector, value);
+        this._updateLoadOption(index, "power_entity_id", value);
+      });
+    });
     this._shadow.querySelectorAll("ha-selector[data-load-number-index]").forEach((selector) => {
       const index = Number(selector.dataset.loadNumberIndex);
       const key = selector.dataset.loadNumberKey;
@@ -471,7 +495,12 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       selector.value = load[key] ?? null;
       selector.addEventListener("value-changed", (event) => {
         const rawValue = event.detail?.value;
-        const value = rawValue === void 0 || rawValue === null || rawValue === "" ? null : Number(rawValue);
+        const value = rawValue === void 0 || rawValue === null || rawValue === "" ? null : constrainNumberValue(
+          rawValue,
+          Number(selector.dataset.min),
+          Number(selector.dataset.max),
+          load[key] ?? null
+        );
         reflectSelectorValue(selector, value);
         this._updateLoadOption(index, key, value);
       });
@@ -549,7 +578,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     });
   }
   _entitySelector(key) {
-    if (key === "grid_entity_id" || key === "production_entity_id" || key === "consumption_entity_id" || key === "battery_power_entity_id") {
+    if (key === "grid_entity_id" || key === "production_entity_id" || key === "consumption_entity_id" || key === "battery_power_entity_id" || key === "load_power_entity_id") {
       return {
         entity: {
           include_entities: relevantPowerEntityIds(this._hass?.states)
@@ -601,7 +630,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   }
   _addLoad() {
     const options = this._collectOptions();
-    options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, min_on_seconds: 300, min_off_seconds: 900, enabled: true });
+    options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, power_entity_id: "", min_on_seconds: 300, min_off_seconds: 900, enabled: true });
     this._options = options;
     this._render();
   }
@@ -672,10 +701,14 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       fields += `<div class="col-md-6">${this._entityField("battery_status_entity_id", "Battery status entity", "Must report charging, idle, or discharging, or use the battery-charging binary sensor class.")}</div>`;
     }
     if (visibility.power) {
+      const negativeCharging = this._options.battery_power_charging_positive === false;
+      const chargingExample = negativeCharging ? "\u2212200 W" : "+200 W";
+      const dischargingExample = negativeCharging ? "+200 W" : "\u2212200 W";
       fields += `
         <div class="col-md-4">${this._entityField("battery_power_entity_id", "Battery power entity", "Live battery charge/discharge power from a measurement sensor using W or kW.")}</div>
         <div class="col-md-4">${this._selectField("battery_power_charging_positive", "Battery power sign", "Select which sensor sign means power is flowing into the battery.")}</div>
-        <div class="col-md-4">${this._numberField("battery_power_threshold_w", "Idle threshold", "Power at or below this magnitude is treated as idle, absorbing sensor noise and standby use.", 0, null, "W")}</div>`;
+        <div class="col-md-4">${this._numberField("battery_power_threshold_w", "Idle threshold magnitude", "Enter a positive magnitude without a plus or minus sign. Readings in either direction up to this value are treated as idle.", 0, null, "W")}</div>
+        <div class="col-12"><div class="alert alert-secondary mb-0"><strong>The threshold is always positive.</strong> With a 100 W threshold, \u221250 W and +50 W are idle; ${chargingExample} is charging and ${dischargingExample} is discharging for the selected sign convention.</div></div>`;
     }
     if (visibility.soc) {
       fields += `
@@ -714,8 +747,9 @@ var SolarSpenderPanelHost = class extends HTMLElement {
           <div class="col-md-6">${this._loadSelect(index, "hvac_mode", "Desired mode", "Only modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan mode", "Optional fan setting. Only fan modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadNumber(index, "temperature", "Target temperature", `Optional target in the selected AC's ${capabilities.minTemp}\u2013${capabilities.maxTemp} \xB0C range.`, capabilities.minTemp, capabilities.maxTemp, "\xB0C", capabilities.tempStep)}</div>
-          <div class="col-md-6">${this._loadNumber(index, "priority", "Priority", "Lower numbers start first and stop last. Equal priorities follow the AC list order.", 0, null, "")}</div>
-          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Expected draw", "Optional conservative running-power estimate used only to decide whether the AC fits.", 0, null, "W")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "priority", "Priority", "Lower numbers start first. During shedding, measured power chooses the best-sized AC; priority breaks ties and controls fallback order.", 0, null, "")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Estimated draw", "Optional conservative running-power estimate. It is used when no valid live AC power reading is available.", 1, null, "W")}</div>
+          <div class="col-md-6">${this._label("Live AC power entity")}<ha-selector data-load-power-index="${index}"></ha-selector>${this._help("Optional W/kW measurement sensor for this AC. During shedding, its current reading is preferred over the estimate so Solar Spender can remove only enough load to cover the measured deficit.")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_on_seconds", "Minimum on", "Seconds the AC must stay on before Solar Spender may release it.", 0, null, "seconds")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_off_seconds", "Minimum off", "Seconds Solar Spender waits before it can start this AC again.", 0, null, "seconds")}</div>
         </div></div></ha-card>`;
@@ -733,7 +767,8 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   _loads(loads) {
     return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => {
       const ownership = loadOwnershipPresentation(load);
-      return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape(load.ownership_reason || "Ownership status unavailable")}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
+      const draw = typeof load.current_power_w === "number" ? ` \xB7 ${Math.round(load.current_power_w)} W current/estimated draw` : "";
+      return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape((load.ownership_reason || "Ownership status unavailable") + draw)}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
     }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`;
   }
   _history(history) {

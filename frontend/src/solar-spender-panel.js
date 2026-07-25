@@ -3,6 +3,7 @@ import {
   applySelectorValue,
   batteryConfigurationVisibility,
   batteryPolicyDescription,
+  constrainNumberValue,
   loadOwnershipPresentation,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
@@ -42,7 +43,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.4.1";
+const PANEL_VERSION = "0.5.0";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
@@ -300,6 +301,7 @@ class SolarSpenderPanelHost extends HTMLElement {
           key === "source_type"
           || key === "battery_policy"
           || key === "battery_direction_source"
+          || key === "battery_power_charging_positive"
         ) {
           this._render();
         }
@@ -313,10 +315,16 @@ class SolarSpenderPanelHost extends HTMLElement {
       selector.addEventListener("value-changed", (event) => {
         const value = event.detail?.value;
         if (value === undefined || value === null || value === "") return;
-        reflectSelectorValue(selector, Number(value));
+        const constrained = constrainNumberValue(
+          value,
+          Number(selector.dataset.min),
+          Number(selector.dataset.max),
+          this._options[key],
+        );
+        reflectSelectorValue(selector, constrained);
         this._options = {
           ...this._options,
-          [key]: Number(value),
+          [key]: constrained,
         };
       });
     });
@@ -350,6 +358,18 @@ class SolarSpenderPanelHost extends HTMLElement {
         this._render();
       });
     });
+    this._shadow.querySelectorAll("ha-selector[data-load-power-index]").forEach((selector) => {
+      const index = Number(selector.dataset.loadPowerIndex);
+      const load = this._options.loads[index] || {};
+      selector.hass = this._hass;
+      selector.selector = this._entitySelector("load_power_entity_id");
+      selector.value = load.power_entity_id || "";
+      selector.addEventListener("value-changed", (event) => {
+        const value = event.detail?.value || "";
+        reflectSelectorValue(selector, value);
+        this._updateLoadOption(index, "power_entity_id", value);
+      });
+    });
     this._shadow.querySelectorAll("ha-selector[data-load-number-index]").forEach((selector) => {
       const index = Number(selector.dataset.loadNumberIndex);
       const key = selector.dataset.loadNumberKey;
@@ -361,7 +381,12 @@ class SolarSpenderPanelHost extends HTMLElement {
         const rawValue = event.detail?.value;
         const value = rawValue === undefined || rawValue === null || rawValue === ""
           ? null
-          : Number(rawValue);
+          : constrainNumberValue(
+            rawValue,
+            Number(selector.dataset.min),
+            Number(selector.dataset.max),
+            load[key] ?? null,
+          );
         reflectSelectorValue(selector, value);
         this._updateLoadOption(index, key, value);
       });
@@ -453,7 +478,8 @@ class SolarSpenderPanelHost extends HTMLElement {
       key === "grid_entity_id" ||
       key === "production_entity_id" ||
       key === "consumption_entity_id" ||
-      key === "battery_power_entity_id"
+      key === "battery_power_entity_id" ||
+      key === "load_power_entity_id"
     ) {
       return {
         entity: {
@@ -509,7 +535,7 @@ class SolarSpenderPanelHost extends HTMLElement {
     }
   }
 
-  _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, min_on_seconds: 300, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
+  _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, power_entity_id: "", min_on_seconds: 300, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
   _removeLoad(index) { const options = this._collectOptions(); options.loads.splice(index, 1); this._options = options; this._render(); }
   _entityField(key, label, help) { return `${this._label(label)}<ha-selector data-key="${key}"></ha-selector>${this._help(help)}`; }
   _numberField(key, label, help, min, max, unit, step = 1) {
@@ -576,10 +602,14 @@ class SolarSpenderPanelHost extends HTMLElement {
       fields += `<div class="col-md-6">${this._entityField("battery_status_entity_id", "Battery status entity", "Must report charging, idle, or discharging, or use the battery-charging binary sensor class.")}</div>`;
     }
     if (visibility.power) {
+      const negativeCharging = this._options.battery_power_charging_positive === false;
+      const chargingExample = negativeCharging ? "−200 W" : "+200 W";
+      const dischargingExample = negativeCharging ? "+200 W" : "−200 W";
       fields += `
         <div class="col-md-4">${this._entityField("battery_power_entity_id", "Battery power entity", "Live battery charge/discharge power from a measurement sensor using W or kW.")}</div>
         <div class="col-md-4">${this._selectField("battery_power_charging_positive", "Battery power sign", "Select which sensor sign means power is flowing into the battery.")}</div>
-        <div class="col-md-4">${this._numberField("battery_power_threshold_w", "Idle threshold", "Power at or below this magnitude is treated as idle, absorbing sensor noise and standby use.", 0, null, "W")}</div>`;
+        <div class="col-md-4">${this._numberField("battery_power_threshold_w", "Idle threshold magnitude", "Enter a positive magnitude without a plus or minus sign. Readings in either direction up to this value are treated as idle.", 0, null, "W")}</div>
+        <div class="col-12"><div class="alert alert-secondary mb-0"><strong>The threshold is always positive.</strong> With a 100 W threshold, −50 W and +50 W are idle; ${chargingExample} is charging and ${dischargingExample} is discharging for the selected sign convention.</div></div>`;
     }
     if (visibility.soc) {
       fields += `
@@ -618,8 +648,9 @@ class SolarSpenderPanelHost extends HTMLElement {
           <div class="col-md-6">${this._loadSelect(index, "hvac_mode", "Desired mode", "Only modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan mode", "Optional fan setting. Only fan modes reported by the selected climate entity are offered.")}</div>
           <div class="col-md-6">${this._loadNumber(index, "temperature", "Target temperature", `Optional target in the selected AC's ${capabilities.minTemp}–${capabilities.maxTemp} °C range.`, capabilities.minTemp, capabilities.maxTemp, "°C", capabilities.tempStep)}</div>
-          <div class="col-md-6">${this._loadNumber(index, "priority", "Priority", "Lower numbers start first and stop last. Equal priorities follow the AC list order.", 0, null, "")}</div>
-          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Expected draw", "Optional conservative running-power estimate used only to decide whether the AC fits.", 0, null, "W")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "priority", "Priority", "Lower numbers start first. During shedding, measured power chooses the best-sized AC; priority breaks ties and controls fallback order.", 0, null, "")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Estimated draw", "Optional conservative running-power estimate. It is used when no valid live AC power reading is available.", 1, null, "W")}</div>
+          <div class="col-md-6">${this._label("Live AC power entity")}<ha-selector data-load-power-index="${index}"></ha-selector>${this._help("Optional W/kW measurement sensor for this AC. During shedding, its current reading is preferred over the estimate so Solar Spender can remove only enough load to cover the measured deficit.")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_on_seconds", "Minimum on", "Seconds the AC must stay on before Solar Spender may release it.", 0, null, "seconds")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_off_seconds", "Minimum off", "Seconds Solar Spender waits before it can start this AC again.", 0, null, "seconds")}</div>
         </div></div></ha-card>`;
@@ -634,7 +665,10 @@ class SolarSpenderPanelHost extends HTMLElement {
   _card(title, value, detail) { return `<div class="col-12 col-sm-6 col-xl"><ha-card class="status-card"><div class="card-content"><div class="text-body-secondary small">${this._escape(title)}</div><div class="fs-4 fw-semibold">${this._escape(value)}</div><div class="small text-body-secondary text-break">${this._escape(detail)}</div></div></ha-card></div>`; }
   _loads(loads) { return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => {
     const ownership = loadOwnershipPresentation(load);
-    return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape(load.ownership_reason || "Ownership status unavailable")}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
+    const draw = typeof load.current_power_w === "number"
+      ? ` · ${Math.round(load.current_power_w)} W current/estimated draw`
+      : "";
+    return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape((load.ownership_reason || "Ownership status unavailable") + draw)}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
   }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No climate loads configured.</p>`; }
   _history(history) { return history.length ? `<ul class="list-group list-group-flush">${history.slice().reverse().map((item) => `<li class="list-group-item px-0 small"><div>${this._escape(item.message)}</div><div class="text-body-secondary">${this._escape(item.at)}</div></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No decisions yet.</p>`; }
   _watts(value) { return typeof value === "number" ? `${Math.round(value)} W` : "—"; }

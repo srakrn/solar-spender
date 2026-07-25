@@ -13,6 +13,13 @@ export function reflectSelectorValue(selector, value) {
   selector.value = value;
 }
 
+export function constrainNumberValue(value, min, max, previousValue) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return previousValue;
+  if (numeric < min || numeric > max) return previousValue;
+  return numeric;
+}
+
 export function sourceConfigurationVisibility(sourceType) {
   return {
     grid: sourceType === "grid_flow",
