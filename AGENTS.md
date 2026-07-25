@@ -441,3 +441,5 @@ Do not claim a check passed if it was not run.
 - Explain migrations and breaking configuration changes in release notes.
 - Do not add dependencies when the standard library or Home Assistant already
   provides the needed facility.
+- Use `git` commands directly for commits and pushes; do not require or use the
+  GitHub CLI (`gh`) for those operations.

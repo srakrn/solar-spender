@@ -31,7 +31,7 @@ async def async_setup_entry(
 
 
 class SolarSpenderAutomationSwitch(SwitchEntity):
-    """Pause or resume automatic load control without releasing owned ACs."""
+    """Enable or disable automatic load control without releasing owned ACs."""
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_has_entity_name = True
@@ -73,7 +73,7 @@ class SolarSpenderAutomationSwitch(SwitchEntity):
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Pause automatic control without releasing owned ACs."""
+        """Disable automatic control without releasing owned ACs."""
         await async_update_runtime_option(
             self.hass,
             self._entry,

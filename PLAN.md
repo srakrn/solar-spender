@@ -24,6 +24,8 @@ The first release will support:
 - per-AC minimum-off time before reactivation;
 - explicit ownership so unrelated HVAC use is never shut down;
 - live status and configuration in a left-sidebar panel.
+- timed operational pauses for ignoring short-lived household peaks without
+  changing owned loads.
 
 ## 2. Operating model
 
@@ -426,6 +428,7 @@ Proposed command surface:
 - `solar_spender/status/subscribe`
 - `solar_spender/history/get`
 - `solar_spender/control/set_enabled`
+- `solar_spender/control/set_pause`
 - `solar_spender/control/release_owned`
 
 Every command has a versioned schema and structured errors. Configuration update
@@ -451,6 +454,15 @@ Status includes:
 
 Do not store an unbounded event log. Home Assistant's own logbook/history can be
 integrated later if useful.
+
+A timed pause is runtime state, not configuration. While paused, source and
+battery changes, feedback votes, activation, shedding, and manual-override
+reconciliation are frozen. Ownership is retained and no climate service is
+called. The wall-clock pause deadline survives restart. Resuming discards an
+interrupted feedback assessment and restarts that assessment using fresh
+post-resume reports. If no assessment was interrupted, it evaluates the current
+input snapshot immediately. A restart during a pause still requires the normal
+conservative lease-recovery barrier.
 
 ## 7. Frontend shape
 

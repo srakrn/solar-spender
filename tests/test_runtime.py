@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import importlib.util
 from pathlib import Path
 import sys
@@ -34,6 +34,19 @@ class RuntimeRecoveryTests(unittest.TestCase):
         )
         self.assertIsNone(RUNTIME.parse_aware_datetime("2026-07-25T12:00:00"))
         self.assertIsNone(RUNTIME.parse_aware_datetime("not-a-timestamp"))
+
+    def test_pause_remaining_time_expires_without_going_negative(self) -> None:
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+
+        self.assertEqual(
+            RUNTIME.pause_remaining_seconds(now + timedelta(minutes=5), now),
+            300,
+        )
+        self.assertEqual(
+            RUNTIME.pause_remaining_seconds(now - timedelta(seconds=1), now),
+            0,
+        )
+        self.assertEqual(RUNTIME.pause_remaining_seconds(None, now), 0)
 
     def test_current_climate_must_match_every_commanded_field(self) -> None:
         profile = {

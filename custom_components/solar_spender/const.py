@@ -13,7 +13,7 @@ PLATFORMS: Final[list[Platform]] = [
     Platform.SWITCH,
 ]
 
-PANEL_VERSION: Final = "0.6.1"
+PANEL_VERSION: Final = "0.7.0"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
@@ -106,6 +106,7 @@ DEFAULT_OPTIONS: Final = {
 }
 
 STATE_DISABLED: Final = "disabled"
+STATE_PAUSED: Final = "paused"
 STATE_MONITORING: Final = "monitoring"
 STATE_SPENDING: Final = "spending"
 STATE_SHEDDING: Final = "shedding"

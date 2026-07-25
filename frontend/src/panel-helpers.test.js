@@ -103,7 +103,7 @@ test("disabled status cards describe inactive and unconfigured states honestly",
 
   assert.deepEqual(cards.controller, {
     value: "Disabled",
-    detail: "Automation is paused. Solar Spender will not start or release ACs.",
+    detail: "Automation is disabled. Solar Spender will not start or release ACs.",
   });
   assert.equal(cards.surplus.value, "Unknown");
   assert.equal(cards.battery.value, "Not configured");
@@ -192,6 +192,27 @@ test("enabled status cards use readable controller state labels", () => {
   );
 });
 
+test("timed pause freezes every live decision card", () => {
+  const cards = statusPresentations(
+    {
+      enabled: true,
+      paused: true,
+      paused_until: "2026-07-25T12:05:00+00:00",
+      source_valid: true,
+      surplus_available: false,
+      battery_allowed: false,
+      feedback: { waiting: true, votes: [false] },
+    },
+    { battery_policy: "charging_or_soc" },
+  );
+
+  assert.equal(cards.controller.value, "Paused");
+  assert.equal(cards.surplus.value, "Frozen");
+  assert.equal(cards.battery.value, "Frozen");
+  assert.equal(cards.feedback.value, "Paused");
+  assert.match(cards.feedback.detail, /fresh reports/i);
+});
+
 test("configured battery condition is inactive while Solar Spender is disabled", () => {
   const cards = statusPresentations(
     {
@@ -238,6 +259,9 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /Waste headroom/);
   assert.match(source, /lease\(s\) recovered after restart or reload/);
   assert.match(source, /ambiguous lease\(s\) were not restored/);
+  assert.match(source, /Pause 5 min/);
+  assert.match(source, /solar_spender\/control\/set_pause/);
+  assert.match(source, /Resume now/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {

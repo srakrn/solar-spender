@@ -9,6 +9,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     BATTERY_CHARGING_OR_SOC,
@@ -33,6 +34,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_get_status)
     websocket_api.async_register_command(hass, websocket_get_config)
     websocket_api.async_register_command(hass, websocket_update_config)
+    websocket_api.async_register_command(hass, websocket_set_pause)
 
 
 def _controller(hass: HomeAssistant) -> SolarSpenderController | None:
@@ -110,6 +112,34 @@ async def websocket_update_config(
     )
     hass.config_entries.async_update_entry(entry, options=options)
     connection.send_result(msg["id"], {"reloading": reloading})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "solar_spender/control/set_pause",
+        vol.Required("minutes"): vol.All(vol.Coerce(int), vol.Range(min=0, max=1440)),
+    }
+)
+@websocket_api.async_response
+async def websocket_set_pause(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Temporarily ignore all controller inputs, or resume with zero minutes."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Administrator access is required")
+        return
+    controller = _controller(hass)
+    if controller is None:
+        connection.send_error(msg["id"], "not_configured", "Solar Spender is not configured")
+        return
+    try:
+        await controller.async_set_pause(msg["minutes"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "invalid_pause", str(err))
+        return
+    connection.send_result(msg["id"], controller.status())
 
 
 def _entry(hass: HomeAssistant) -> ConfigEntry | None:

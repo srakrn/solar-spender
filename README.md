@@ -16,6 +16,12 @@ confirmation timing. The headroom sensor continues evaluating while automation
 is disabled. These entities can be used from dashboards and automations; source
 wiring and AC profiles remain in the sidebar panel.
 
+The sidebar also has 5, 15, and 30 minute pause controls. A timed pause freezes
+source, battery, feedback, and ownership reactions while leaving every AC
+untouched. When the pause ends, current inputs are evaluated again; if Solar
+Spender was confirming a load change, that interrupted confirmation restarts
+using only fresh post-pause reports.
+
 ## Development
 
 Build the bundled Bootstrap panel after changing frontend source:
@@ -75,3 +81,6 @@ valid source and load options are saved and automation is enabled.
 - Confirmed ownership leases, timing deadlines, cycle blocks, and recent
   decisions survive restart. A lease is recovered only if the AC still matches
   Solar Spender's exact commanded profile; ambiguous ACs are left untouched.
+- A timed pause survives restart, ignores short household peaks, never starts or
+  releases an AC, and discards any confirmation sequence interrupted by the
+  pause.

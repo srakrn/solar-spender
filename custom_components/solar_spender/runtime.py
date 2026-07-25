@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from collections.abc import Mapping
+from math import ceil
 from typing import Any
 
 
@@ -16,6 +17,16 @@ def parse_aware_datetime(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None
+
+
+def pause_remaining_seconds(
+    paused_until: datetime | None,
+    now: datetime,
+) -> int:
+    """Return whole seconds remaining for a timezone-aware pause deadline."""
+    if paused_until is None or paused_until.tzinfo is None or now.tzinfo is None:
+        return 0
+    return max(0, ceil((paused_until - now).total_seconds()))
 
 
 def climate_matches_commanded_profile(

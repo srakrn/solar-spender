@@ -68,10 +68,12 @@ function loadOwnershipPresentation(load) {
 }
 function statusPresentations(status, options) {
   const enabled = Boolean(status?.enabled);
+  const paused = Boolean(status?.paused);
   const stateLabels = {
     blocked_battery: "Blocked by battery",
     disabled: "Disabled",
     monitoring: "Monitoring",
+    paused: "Paused",
     probing: "Testing one AC",
     shedding: "Releasing loads",
     spending: "Spending solar",
@@ -79,14 +81,20 @@ function statusPresentations(status, options) {
   };
   const batteryConfigured = options?.battery_policy !== "disabled";
   return {
-    controller: enabled ? {
+    controller: enabled && paused ? {
+      value: "Paused",
+      detail: status?.paused_until ? `Ignoring all input changes until ${new Date(status.paused_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Owned ACs stay untouched.` : "Ignoring all input changes. Owned ACs stay untouched."
+    } : enabled ? {
       value: stateLabels[status?.state] || "Starting",
       detail: status?.reason || "Evaluating the configured source."
     } : {
       value: "Disabled",
-      detail: "Automation is paused. Solar Spender will not start or release ACs."
+      detail: "Automation is disabled. Solar Spender will not start or release ACs."
     },
-    surplus: status?.source_valid ? {
+    surplus: paused ? {
+      value: "Frozen",
+      detail: "Source changes during the pause do not update Solar Spender's decision."
+    } : status?.source_valid ? {
       value: status?.waste_headroom_available ? "Available" : "Unavailable",
       detail: status?.surplus_available && !status?.waste_headroom_available ? "The solar source qualifies, but the configured battery still has first claim on the power." : null
     } : {
@@ -99,6 +107,9 @@ function statusPresentations(status, options) {
     } : !enabled ? {
       value: "Inactive",
       detail: "The configured battery condition is evaluated only while Solar Spender is enabled."
+    } : paused ? {
+      value: "Frozen",
+      detail: "Battery changes are ignored until Solar Spender resumes."
     } : {
       value: status?.battery_allowed ? "Open" : "Blocking",
       detail: `${status?.battery_allowed ? "The configured battery condition permits a new activation." : "New activations are paused by the battery condition."}` + (status?.battery_direction ? ` Direction: ${status.battery_direction}.` : "") + (typeof status?.battery_power_w === "number" ? ` Normalized battery power: ${Math.round(status.battery_power_w)} W (positive is charging).` : "")
@@ -106,6 +117,9 @@ function statusPresentations(status, options) {
     feedback: !enabled ? {
       value: "Idle",
       detail: "Fresh feedback is required only after Solar Spender changes a load."
+    } : paused ? {
+      value: "Paused",
+      detail: "Any interrupted confirmation was discarded; fresh reports will be required after resume."
     } : status?.feedback?.waiting ? {
       value: `Checking ${(status.feedback.votes || []).length + 1} of ${status.feedback.sample_count || 1}`,
       detail: `Yes ${(status.feedback.votes || []).filter(Boolean).length} \xB7 No ${(status.feedback.votes || []).filter((vote) => !vote).length}` + ((status.feedback.pending_entities || []).length ? ` \xB7 Waiting for ${(status.feedback.pending_entities || []).join(", ")}` : "")
@@ -176,7 +190,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.6.1";
+var PANEL_VERSION = "0.7.0";
 var KEEP_CURRENT = "__keep_current__";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
@@ -329,8 +343,17 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     app.innerHTML = `
       <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
         <div><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Use spare solar power for climate loads.</p></div>
-        <button class="btn btn-outline-primary" id="refresh" type="button">Refresh</button>
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <div class="btn-group" role="group" aria-label="Temporarily pause Solar Spender">
+            <button class="btn btn-outline-warning" data-pause-minutes="5" type="button" ${status.enabled ? "" : "disabled"}>Pause 5 min</button>
+            <button class="btn btn-outline-warning" data-pause-minutes="15" type="button" ${status.enabled ? "" : "disabled"}>15 min</button>
+            <button class="btn btn-outline-warning" data-pause-minutes="30" type="button" ${status.enabled ? "" : "disabled"}>30 min</button>
+          </div>
+          <button class="btn btn-outline-primary" id="resume" type="button" ${status.paused ? "" : "disabled"}>Resume now</button>
+          <button class="btn btn-outline-primary" id="refresh" type="button">Refresh</button>
+        </div>
       </div>
+      <div class="small mb-3 ${status.paused ? "text-warning" : "text-body-secondary"}" id="pause_result" role="status">${this._escape(this._pauseSummary(status))}</div>
       <div class="row g-3 mb-3">
         ${this._card("Solar Spender", cards.controller.value, cards.controller.detail)}
         ${this._card("Waste headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
@@ -371,6 +394,10 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       </div>`;
     this._hydrateHaSelectors();
     app.querySelector("#refresh").addEventListener("click", () => this._load());
+    app.querySelector("#resume").addEventListener("click", () => this._setPause(0));
+    app.querySelectorAll("[data-pause-minutes]").forEach((button) => {
+      button.addEventListener("click", () => this._setPause(Number(button.dataset.pauseMinutes)));
+    });
     app.querySelector("#settings").addEventListener("submit", (event) => this._save(event));
     app.querySelector("#add_load").addEventListener("click", () => this._addLoad());
     app.querySelectorAll("[data-remove-load]").forEach((button) => button.addEventListener("click", () => this._removeLoad(Number(button.dataset.removeLoad))));
@@ -627,6 +654,34 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       result.className = "small text-danger";
       result.textContent = error?.message || "Configuration could not be saved.";
     }
+  }
+  async _setPause(minutes) {
+    const result = this._shadow.querySelector("#pause_result");
+    try {
+      result.className = "small mb-3 text-body-secondary";
+      result.textContent = minutes ? `Pausing for ${minutes} minutes\u2026` : "Resuming\u2026";
+      this._status = await this._hass.connection.sendMessagePromise({
+        type: "solar_spender/control/set_pause",
+        minutes
+      });
+      this._render();
+    } catch (error) {
+      result.className = "small mb-3 text-danger";
+      result.textContent = error?.message || "Pause control failed.";
+    }
+  }
+  _pauseSummary(status) {
+    if (!status.enabled) {
+      return "Enable Automation before using a timed pause.";
+    }
+    if (!status.paused) {
+      return "A timed pause ignores short-lived household peaks without starting or releasing any AC.";
+    }
+    const minutes = Math.max(
+      1,
+      Math.ceil(Number(status.pause_remaining_seconds || 0) / 60)
+    );
+    return `Paused for about ${minutes} more minute${minutes === 1 ? "" : "s"}. Input changes are frozen and owned ACs stay untouched.`;
   }
   _addLoad() {
     const options = this._collectOptions();

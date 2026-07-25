@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from asyncio import sleep
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -34,6 +35,7 @@ from .const import (
     STATE_BLOCKED_BATTERY,
     STATE_DISABLED,
     STATE_MONITORING,
+    STATE_PAUSED,
     STATE_PROBING,
     STATE_SHEDDING,
     STATE_SPENDING,
@@ -52,6 +54,7 @@ from .runtime import (
     climate_matches_commanded_profile,
     load_definition_matches_profile,
     parse_aware_datetime,
+    pause_remaining_seconds,
 )
 from .source import (
     observable_surplus_available,
@@ -110,6 +113,9 @@ class SolarSpenderController:
         self._runtime_store = RuntimeStore(hass, entry_id)
         self._restored_lease_count = 0
         self._discarded_lease_count = 0
+        self._paused_until: datetime | None = None
+        self._paused_feedback_assessment: FeedbackAssessment | None = None
+        self._resume_requires_recovery = False
 
     async def async_start(self) -> None:
         """Subscribe to all configured entities and evaluate initial state."""
@@ -131,21 +137,21 @@ class SolarSpenderController:
                     event_filter=self._is_feedback_report,
                 )
             )
-        if self._leases:
-            now = datetime.now().astimezone()
-            self._feedback_assessment = FeedbackAssessment(
-                action="recovery",
-                load_entity_id="restored leases",
-                next_not_before=now + timedelta(seconds=self.config.settling_seconds),
-                required_entities=self._feedback_entity_ids,
-                sample_count=self.config.feedback_sample_count,
-                sample_interval=timedelta(
-                    minutes=self.config.feedback_sample_interval_minutes
-                ),
-            )
+        if self._leases and not self._pause_is_active():
+            self._begin_recovery_feedback("restored leases")
             self._record(
                 f"Restored {len(self._leases)} confirmed lease(s); "
                 "waiting for fresh source feedback"
+            )
+        if self._pause_is_active():
+            assert self._paused_until is not None
+            self._schedule_reconcile(
+                max(
+                    0,
+                    (
+                        self._paused_until - datetime.now().astimezone()
+                    ).total_seconds(),
+                )
             )
         await self.async_reconcile("started")
 
@@ -163,12 +169,52 @@ class SolarSpenderController:
         """Apply options exposed as entities without dropping active leases."""
         self.config = config
         if not config.enabled:
+            self._paused_until = None
+            self._paused_feedback_assessment = None
+            self._resume_requires_recovery = False
             self._feedback_assessment = None
             self._next_load_not_before = None
             if self._scheduled is not None:
                 self._scheduled()
                 self._scheduled = None
         await self.async_reconcile("runtime setting changed")
+
+    async def async_set_pause(self, minutes: int) -> None:
+        """Pause all controller reactions temporarily, or resume with zero."""
+        if minutes < 0 or minutes > 1440:
+            raise HomeAssistantError("pause duration must be from 0 to 1440 minutes")
+        if minutes and not self.config.enabled:
+            raise HomeAssistantError("enable Solar Spender before pausing it")
+
+        # A climate change is atomic from the controller's perspective. If one
+        # is already in flight, start the pause immediately after it completes.
+        while self._reconciling:
+            await sleep(0)
+
+        now = datetime.now().astimezone()
+        if self._scheduled is not None:
+            self._scheduled()
+            self._scheduled = None
+
+        if minutes:
+            self._confirm_pending_activation()
+            if self._feedback_assessment is not None:
+                self._paused_feedback_assessment = self._feedback_assessment
+            self._feedback_assessment = None
+            self._paused_until = now + timedelta(minutes=minutes)
+            self._set_state(
+                STATE_PAUSED,
+                f"paused until {self._paused_until.isoformat(timespec='seconds')}",
+            )
+            self._schedule_reconcile(minutes * 60)
+        else:
+            was_paused = self._paused_until is not None
+            self._paused_until = None
+            if was_paused:
+                self._resume_after_pause(now, "Pause ended")
+
+        await self._runtime_store.async_save(self._runtime_payload())
+        await self.async_reconcile("pause changed")
 
     def supports_runtime_config(self, config: SolarSpenderConfig) -> bool:
         """Return whether config can change without replacing subscriptions."""
@@ -250,6 +296,17 @@ class SolarSpenderController:
             return
         self._reconciling = True
         try:
+            now = datetime.now().astimezone()
+            if self._pause_is_active(now):
+                assert self._paused_until is not None
+                self._set_state(
+                    STATE_PAUSED,
+                    f"paused until {self._paused_until.isoformat(timespec='seconds')}",
+                )
+                return
+            if self._paused_until is not None:
+                self._paused_until = None
+                self._resume_after_pause(now, "Pause expired")
             self._update_inputs()
             self._relinquish_manual_overrides()
             self._confirm_pending_activation()
@@ -1062,7 +1119,48 @@ class SolarSpenderController:
         self._scheduled = None
         self.hass.async_create_task(self.async_reconcile("scheduled check"))
 
+    def _pause_is_active(self, now: datetime | None = None) -> bool:
+        """Return whether the persisted temporary pause is still active."""
+        current = now or datetime.now().astimezone()
+        return pause_remaining_seconds(self._paused_until, current) > 0
+
+    def _begin_recovery_feedback(self, label: str) -> None:
+        """Require fresh post-boundary reports before changing another load."""
+        now = datetime.now().astimezone()
+        self._feedback_assessment = FeedbackAssessment(
+            action="recovery",
+            load_entity_id=label,
+            next_not_before=now + timedelta(seconds=self.config.settling_seconds),
+            required_entities=self._feedback_entity_ids,
+            sample_count=self.config.feedback_sample_count,
+            sample_interval=timedelta(
+                minutes=self.config.feedback_sample_interval_minutes
+            ),
+        )
+
+    def _resume_after_pause(self, now: datetime, message: str) -> None:
+        """Restore only feedback work that still needs a post-pause decision."""
+        assessment = self._paused_feedback_assessment
+        self._paused_feedback_assessment = None
+        if assessment is not None and (
+            assessment.action != "activation"
+            or assessment.load_entity_id in self._leases
+        ):
+            assessment.votes.clear()
+            assessment.measurements_w.clear()
+            assessment.next_not_before = now
+            self._feedback_assessment = assessment
+            self._record(f"{message}; restarting interrupted confirmation")
+        elif self._resume_requires_recovery and self._leases:
+            self._begin_recovery_feedback("post-restart paused leases")
+            self._record(f"{message}; requiring fresh restart-recovery feedback")
+        else:
+            self._record(f"{message}; evaluating current inputs")
+        self._resume_requires_recovery = False
+
     def _set_state(self, state: str, reason: str) -> None:
+        if self.state == state and self.reason == reason:
+            return
         self.state = state
         self.reason = reason
         self._record(reason)
@@ -1110,6 +1208,11 @@ class SolarSpenderController:
                 "upper_unsupported_w": self._cycle_memory.upper_unsupported_w,
             },
             "pending_unsupported_release": self._pending_unsupported_release,
+            "paused_until": (
+                self._paused_until.isoformat()
+                if self._paused_until is not None
+                else None
+            ),
             "history": self._event_history,
         }
 
@@ -1141,6 +1244,9 @@ class SolarSpenderController:
         )
         if next_load_not_before is not None and next_load_not_before > now:
             self._next_load_not_before = next_load_not_before
+        paused_until = parse_aware_datetime(data.get("paused_until"))
+        if paused_until is not None and paused_until > now and self.config.enabled:
+            self._paused_until = paused_until
         leases = data.get("leases")
         persisted_lease_count = len(leases) if isinstance(leases, dict) else 0
         if isinstance(leases, dict):
@@ -1185,6 +1291,9 @@ class SolarSpenderController:
                     previous_profile=previous_profile,
                 )
         self._restored_lease_count = len(self._leases)
+        self._resume_requires_recovery = (
+            self._paused_until is not None and bool(self._leases)
+        )
         self._discarded_lease_count = (
             persisted_lease_count - self._restored_lease_count
         )
@@ -1313,6 +1422,20 @@ class SolarSpenderController:
             "state": self.state,
             "reason": self.reason,
             "enabled": self.config.enabled,
+            "paused": self._pause_is_active(),
+            "paused_until": (
+                self._paused_until.isoformat()
+                if self._pause_is_active()
+                else None
+            ),
+            "pause_remaining_seconds": (
+                pause_remaining_seconds(
+                    self._paused_until,
+                    datetime.now().astimezone(),
+                )
+                if self._pause_is_active() and self._paused_until is not None
+                else 0
+            ),
             "raw_source_value": self.raw_source_value,
             "source_valid": self.source_valid,
             "surplus_available": self.surplus_available,

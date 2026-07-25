@@ -81,10 +81,12 @@ export function loadOwnershipPresentation(load) {
 
 export function statusPresentations(status, options) {
   const enabled = Boolean(status?.enabled);
+  const paused = Boolean(status?.paused);
   const stateLabels = {
     blocked_battery: "Blocked by battery",
     disabled: "Disabled",
     monitoring: "Monitoring",
+    paused: "Paused",
     probing: "Testing one AC",
     shedding: "Releasing loads",
     spending: "Spending solar",
@@ -93,16 +95,28 @@ export function statusPresentations(status, options) {
   const batteryConfigured = options?.battery_policy !== "disabled";
 
   return {
-    controller: enabled
+    controller: enabled && paused
+      ? {
+          value: "Paused",
+          detail: status?.paused_until
+            ? `Ignoring all input changes until ${new Date(status.paused_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Owned ACs stay untouched.`
+            : "Ignoring all input changes. Owned ACs stay untouched.",
+        }
+      : enabled
       ? {
           value: stateLabels[status?.state] || "Starting",
           detail: status?.reason || "Evaluating the configured source.",
         }
       : {
           value: "Disabled",
-          detail: "Automation is paused. Solar Spender will not start or release ACs.",
+          detail: "Automation is disabled. Solar Spender will not start or release ACs.",
         },
-    surplus: status?.source_valid
+    surplus: paused
+      ? {
+          value: "Frozen",
+          detail: "Source changes during the pause do not update Solar Spender's decision.",
+        }
+      : status?.source_valid
       ? {
           value: status?.waste_headroom_available ? "Available" : "Unavailable",
           detail: status?.surplus_available
@@ -124,7 +138,12 @@ export function statusPresentations(status, options) {
             value: "Inactive",
             detail: "The configured battery condition is evaluated only while Solar Spender is enabled.",
           }
-        : {
+        : paused
+          ? {
+              value: "Frozen",
+              detail: "Battery changes are ignored until Solar Spender resumes.",
+            }
+          : {
             value: status?.battery_allowed ? "Open" : "Blocking",
             detail: `${status?.battery_allowed
               ? "The configured battery condition permits a new activation."
@@ -141,7 +160,12 @@ export function statusPresentations(status, options) {
           value: "Idle",
           detail: "Fresh feedback is required only after Solar Spender changes a load.",
         }
-      : status?.feedback?.waiting
+      : paused
+        ? {
+            value: "Paused",
+            detail: "Any interrupted confirmation was discarded; fresh reports will be required after resume.",
+          }
+        : status?.feedback?.waiting
         ? {
             value: `Checking ${(status.feedback.votes || []).length + 1} of ${status.feedback.sample_count || 1}`,
             detail: `Yes ${(status.feedback.votes || []).filter(Boolean).length} · No ${(status.feedback.votes || []).filter((vote) => !vote).length}`

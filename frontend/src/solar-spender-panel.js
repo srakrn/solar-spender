@@ -43,7 +43,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.6.1";
+const PANEL_VERSION = "0.7.0";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
@@ -200,8 +200,17 @@ class SolarSpenderPanelHost extends HTMLElement {
     app.innerHTML = `
       <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
         <div><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Use spare solar power for climate loads.</p></div>
-        <button class="btn btn-outline-primary" id="refresh" type="button">Refresh</button>
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <div class="btn-group" role="group" aria-label="Temporarily pause Solar Spender">
+            <button class="btn btn-outline-warning" data-pause-minutes="5" type="button" ${status.enabled ? "" : "disabled"}>Pause 5 min</button>
+            <button class="btn btn-outline-warning" data-pause-minutes="15" type="button" ${status.enabled ? "" : "disabled"}>15 min</button>
+            <button class="btn btn-outline-warning" data-pause-minutes="30" type="button" ${status.enabled ? "" : "disabled"}>30 min</button>
+          </div>
+          <button class="btn btn-outline-primary" id="resume" type="button" ${status.paused ? "" : "disabled"}>Resume now</button>
+          <button class="btn btn-outline-primary" id="refresh" type="button">Refresh</button>
+        </div>
       </div>
+      <div class="small mb-3 ${status.paused ? "text-warning" : "text-body-secondary"}" id="pause_result" role="status">${this._escape(this._pauseSummary(status))}</div>
       <div class="row g-3 mb-3">
         ${this._card("Solar Spender", cards.controller.value, cards.controller.detail)}
         ${this._card("Waste headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
@@ -242,6 +251,10 @@ class SolarSpenderPanelHost extends HTMLElement {
       </div>`;
     this._hydrateHaSelectors();
     app.querySelector("#refresh").addEventListener("click", () => this._load());
+    app.querySelector("#resume").addEventListener("click", () => this._setPause(0));
+    app.querySelectorAll("[data-pause-minutes]").forEach((button) => {
+      button.addEventListener("click", () => this._setPause(Number(button.dataset.pauseMinutes)));
+    });
     app.querySelector("#settings").addEventListener("submit", (event) => this._save(event));
     app.querySelector("#add_load").addEventListener("click", () => this._addLoad());
     app.querySelectorAll("[data-remove-load]").forEach((button) => button.addEventListener("click", () => this._removeLoad(Number(button.dataset.removeLoad))));
@@ -533,6 +546,38 @@ class SolarSpenderPanelHost extends HTMLElement {
       result.className = "small text-danger";
       result.textContent = error?.message || "Configuration could not be saved.";
     }
+  }
+
+  async _setPause(minutes) {
+    const result = this._shadow.querySelector("#pause_result");
+    try {
+      result.className = "small mb-3 text-body-secondary";
+      result.textContent = minutes
+        ? `Pausing for ${minutes} minutes…`
+        : "Resuming…";
+      this._status = await this._hass.connection.sendMessagePromise({
+        type: "solar_spender/control/set_pause",
+        minutes,
+      });
+      this._render();
+    } catch (error) {
+      result.className = "small mb-3 text-danger";
+      result.textContent = error?.message || "Pause control failed.";
+    }
+  }
+
+  _pauseSummary(status) {
+    if (!status.enabled) {
+      return "Enable Automation before using a timed pause.";
+    }
+    if (!status.paused) {
+      return "A timed pause ignores short-lived household peaks without starting or releasing any AC.";
+    }
+    const minutes = Math.max(
+      1,
+      Math.ceil(Number(status.pause_remaining_seconds || 0) / 60),
+    );
+    return `Paused for about ${minutes} more minute${minutes === 1 ? "" : "s"}. Input changes are frozen and owned ACs stay untouched.`;
   }
 
   _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, power_entity_id: "", min_on_seconds: 300, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
