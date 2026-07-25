@@ -278,6 +278,24 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /Resume now/);
 });
 
+test("panel uses the Home Assistant mobile shell and controls", () => {
+  const source = readFileSync(
+    new URL("./solar-spender-panel.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /set narrow\(value\)/);
+  assert.match(source, /hass-toggle-menu/);
+  assert.match(source, /bubbles: true/);
+  assert.match(source, /composed: true/);
+  assert.match(source, /<ha-icon-button id="menu"/);
+  assert.match(source, /<ha-button data-pause-minutes="5"/);
+  assert.match(source, /<ha-button id="save"/);
+  assert.match(source, /env\(safe-area-inset-top/);
+  assert.match(source, /min-height: 44px/);
+  assert.doesNotMatch(source, /<button\b/);
+});
+
 test("power entities are restricted to W and kW power sensors", () => {
   const states = {
     "sensor.grid_power": {

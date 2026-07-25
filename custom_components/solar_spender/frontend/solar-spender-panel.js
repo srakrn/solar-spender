@@ -234,17 +234,54 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     this._status = null;
     this._loaded = false;
     this._loading = false;
+    this._narrow = false;
+    this._shellActionsWired = false;
     this._shadow = this.attachShadow({ mode: "open" });
     this._shadow.innerHTML = `
       <style>
         ${bootstrap_min_default}
         :host {
+          --panel-space: 16px;
           color: var(--primary-text-color);
           background: var(--primary-background-color);
+          display: block;
+          min-height: 100%;
+        }
+        .top-bar {
+          position: sticky;
+          z-index: 10;
+          top: 0;
+          min-height: calc(64px + env(safe-area-inset-top, 0px));
+          padding: env(safe-area-inset-top, 0px) var(--panel-space) 0;
+          color: var(--app-header-text-color, var(--primary-text-color));
+          background: var(--app-header-background-color, var(--primary-background-color));
+          border-bottom: 1px solid var(--divider-color);
+        }
+        .top-bar-content {
+          display: flex;
+          align-items: center;
+          min-height: 64px;
+          max-width: 1680px;
+          margin: 0 auto;
+          gap: 8px;
+        }
+        .top-bar-title {
+          overflow: hidden;
+          font-size: 20px;
+          font-weight: 500;
+          line-height: 1.2;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         #app {
           max-width: 1680px;
+          margin: 0 auto;
+          padding: var(--panel-space);
+          padding-bottom: calc(var(--panel-space) + env(safe-area-inset-bottom, 0px));
           color: var(--primary-text-color);
+        }
+        [hidden] {
+          display: none !important;
         }
         ha-card {
           display: block;
@@ -257,6 +294,52 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         }
         .card-content {
           padding: 20px;
+        }
+        .page-heading {
+          min-width: 0;
+        }
+        .page-actions {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 8px;
+        }
+        .pause-actions {
+          display: flex;
+          gap: 4px;
+        }
+        ha-button,
+        ha-icon-button {
+          --mdc-icon-size: 20px;
+        }
+        ha-button {
+          min-height: 44px;
+        }
+        ha-button ha-icon {
+          margin-inline-end: 7px;
+        }
+        ha-icon-button {
+          display: inline-flex;
+          min-width: 44px;
+          min-height: 44px;
+          align-items: center;
+          justify-content: center;
+        }
+        .section-title,
+        .status-title {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .section-title ha-icon {
+          flex: 0 0 auto;
+          color: var(--primary-color);
+        }
+        .status-title ha-icon {
+          width: 18px;
+          height: 18px;
+          color: var(--secondary-text-color);
         }
         .status-card .card-content {
           min-height: 118px;
@@ -291,6 +374,70 @@ var SolarSpenderPanelHost = class extends HTMLElement {
         .section-heading {
           color: var(--primary-text-color);
         }
+        .action-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .load-card:last-child {
+          margin-bottom: 0 !important;
+        }
+        @media (max-width: 767.98px) {
+          :host {
+            --panel-space: 12px;
+          }
+          .top-bar {
+            padding-inline: 4px 12px;
+          }
+          .page-header {
+            align-items: flex-start !important;
+          }
+          .page-heading,
+          .page-actions {
+            width: 100%;
+          }
+          .page-actions {
+            justify-content: stretch;
+          }
+          .pause-actions {
+            display: grid;
+            flex: 1 1 100%;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+          }
+          .pause-actions ha-button,
+          .page-actions > ha-button {
+            width: 100%;
+          }
+          .page-actions > ha-button {
+            flex: 1 1 calc(50% - 4px);
+          }
+          .card-content,
+          .config-section {
+            padding: 16px;
+          }
+          .field-help {
+            min-height: 0;
+          }
+          .action-row {
+            align-items: stretch;
+            flex-direction: column;
+          }
+          .action-row ha-button {
+            width: 100%;
+          }
+        }
+        @media (max-width: 575.98px) {
+          .status-card .card-content {
+            min-height: 0;
+          }
+          .status-card .fs-4 {
+            font-size: 1.25rem !important;
+          }
+          .load-card-header {
+            align-items: flex-start !important;
+            gap: 12px;
+          }
+        }
         @media (prefers-reduced-motion: reduce) {
           *, *::before, *::after {
             scroll-behavior: auto !important;
@@ -298,7 +445,16 @@ var SolarSpenderPanelHost = class extends HTMLElement {
           }
         }
       </style>
-      <main class="container-fluid py-3" id="app"></main>`;
+      <header class="top-bar">
+        <div class="top-bar-content">
+          <ha-icon-button id="menu" aria-label="Open Home Assistant menu" title="Open Home Assistant menu">
+            <ha-icon icon="mdi:menu"></ha-icon>
+          </ha-icon-button>
+          <ha-icon icon="mdi:solar-power" aria-hidden="true"></ha-icon>
+          <div class="top-bar-title">Solar Spender</div>
+        </div>
+      </header>
+      <main id="app"></main>`;
   }
   set hass(value) {
     this._hass = value;
@@ -310,8 +466,31 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   get hass() {
     return this._hass;
   }
+  set narrow(value) {
+    this._narrow = Boolean(value);
+    this._syncNarrow();
+  }
+  get narrow() {
+    return this._narrow;
+  }
   connectedCallback() {
+    this._wireShellActions();
+    this._syncNarrow();
     this._render();
+  }
+  _wireShellActions() {
+    if (this._shellActionsWired) return;
+    this._shadow.querySelector("#menu").addEventListener("click", () => {
+      this.dispatchEvent(new CustomEvent("hass-toggle-menu", {
+        bubbles: true,
+        composed: true
+      }));
+    });
+    this._shellActionsWired = true;
+  }
+  _syncNarrow() {
+    const menu = this._shadow?.querySelector("#menu");
+    if (menu) menu.hidden = !this._narrow;
   }
   async _load() {
     if (!this._hass?.connection || this._loading) return;
@@ -342,30 +521,30 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     const status = this._status || {};
     const cards = statusPresentations(status, this._options);
     app.innerHTML = `
-      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-        <div><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Run your ACs on spare solar.</p></div>
-        <div class="d-flex flex-wrap align-items-center gap-2">
-          <div class="btn-group" role="group" aria-label="Temporarily pause Solar Spender">
-            <button class="btn btn-outline-warning" data-pause-minutes="5" type="button" ${status.enabled ? "" : "disabled"}>Pause 5 min</button>
-            <button class="btn btn-outline-warning" data-pause-minutes="15" type="button" ${status.enabled ? "" : "disabled"}>15 min</button>
-            <button class="btn btn-outline-warning" data-pause-minutes="30" type="button" ${status.enabled ? "" : "disabled"}>30 min</button>
+      <div class="page-header d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+        <div class="page-heading"><h1 class="h3 mb-1">Solar Spender <span class="badge text-bg-secondary fs-6 align-middle">v${PANEL_VERSION}</span></h1><p class="text-body-secondary mb-0">Run your ACs on spare solar.</p></div>
+        <div class="page-actions">
+          <div class="pause-actions" role="group" aria-label="Temporarily pause Solar Spender">
+            <ha-button data-pause-minutes="5" ${status.enabled ? "" : "disabled"}><ha-icon icon="mdi:pause"></ha-icon>Pause 5 min</ha-button>
+            <ha-button data-pause-minutes="15" ${status.enabled ? "" : "disabled"}><ha-icon icon="mdi:pause"></ha-icon>15 min</ha-button>
+            <ha-button data-pause-minutes="30" ${status.enabled ? "" : "disabled"}><ha-icon icon="mdi:pause"></ha-icon>30 min</ha-button>
           </div>
-          <button class="btn btn-outline-primary" id="resume" type="button" ${status.paused ? "" : "disabled"}>Resume now</button>
-          <button class="btn btn-outline-primary" id="refresh" type="button">Refresh</button>
+          <ha-button id="resume" ${status.paused ? "" : "disabled"}><ha-icon icon="mdi:play"></ha-icon>Resume now</ha-button>
+          <ha-button id="refresh"><ha-icon icon="mdi:refresh"></ha-icon>Refresh</ha-button>
         </div>
       </div>
       <div class="small mb-3 ${status.paused ? "text-warning" : "text-body-secondary"}" id="pause_result" role="status">${this._escape(this._pauseSummary(status))}</div>
       <div class="row g-3 mb-3">
-        ${this._card("Solar Spender", cards.controller.value, cards.controller.detail)}
-        ${this._card("Spare solar", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
-        ${this._card("Battery check", cards.battery.value, cards.battery.detail)}
-        ${this._card("AC check", cards.feedback.value, cards.feedback.detail)}
-        ${this._card("Solar limit", this._learnedRange(status), "Rough limit for the current period of spare solar.")}
-        ${this._card("ACs", `${status.owned_loads?.length || 0} owned`, status.discarded_lease_count ? `${status.discarded_lease_count} saved AC state(s) could not be trusted. Those ACs were left alone.` : status.restored_lease_count ? `${status.restored_lease_count} owned AC(s) restored after restart.` : "Solar Spender turns off only ACs it turned on.")}
+        ${this._card("Solar Spender", cards.controller.value, cards.controller.detail, "mdi:solar-power")}
+        ${this._card("Spare solar", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status), "mdi:weather-sunny")}
+        ${this._card("Battery check", cards.battery.value, cards.battery.detail, "mdi:battery-medium")}
+        ${this._card("AC check", cards.feedback.value, cards.feedback.detail, "mdi:air-conditioner")}
+        ${this._card("Solar limit", this._learnedRange(status), "Rough limit for the current period of spare solar.", "mdi:gauge")}
+        ${this._card("ACs", `${status.owned_loads?.length || 0} owned`, status.discarded_lease_count ? `${status.discarded_lease_count} saved AC state(s) could not be trusted. Those ACs were left alone.` : status.restored_lease_count ? `${status.restored_lease_count} owned AC(s) restored after restart.` : "Solar Spender turns off only ACs it turned on.", "mdi:home-lightning-bolt")}
       </div>
       <div class="row g-3">
         <section class="col-12 col-xxl-8"><ha-card><div class="card-content">
-          <h2 class="h5 mb-3 section-heading">Settings</h2>
+          ${this._sectionTitle("Settings", "mdi:cog", "h2", "h5 mb-3")}
           <form id="settings" class="row g-3" novalidate>
             <div class="col-md-6">${this._selectField("enabled", "Solar Spender", "When off, Solar Spender will not change any AC.")}</div>
             <div class="col-md-6">${this._selectField("source_type", "How to find spare solar", "Choose the sensors that match your solar system.")}</div>
@@ -382,15 +561,15 @@ var SolarSpenderPanelHost = class extends HTMLElement {
                 <div class="col-12"><div class="alert alert-secondary mb-0">After the first-check wait, each new complete sensor report can count. By default, 3 checks must finish within 15 minutes. Sensor readings older than 15 minutes are unavailable.</div></div>
               </div>
             </div>
-            <div class="col-12"><div class="d-flex justify-content-between align-items-center"><h3 class="h6 mb-0 section-heading">ACs</h3><button type="button" class="btn btn-sm btn-outline-primary" id="add_load">Add AC</button></div><p class="form-text mb-0">Solar Spender turns off only ACs it turned on.</p></div>
+            <div class="col-12"><div class="d-flex justify-content-between align-items-center gap-2">${this._sectionTitle("ACs", "mdi:air-conditioner", "h3", "h6 mb-0")}<ha-button id="add_load"><ha-icon icon="mdi:plus"></ha-icon>Add AC</ha-button></div><p class="form-text mb-0">Solar Spender turns off only ACs it turned on.</p></div>
             <div class="col-12" id="load_rows">${this._loadRows()}</div>
-            <div class="col-12 d-flex align-items-center gap-2"><button class="btn btn-primary" type="submit">Save</button><span id="save_result" class="small" role="status"></span></div>
+            <div class="col-12 action-row"><ha-button id="save"><ha-icon icon="mdi:content-save"></ha-icon>Save settings</ha-button><span id="save_result" class="small" role="status"></span></div>
           </form>
         </div></ha-card></section>
         <section class="col-12 col-xxl-4">
           <div class="d-grid gap-3">
-            <ha-card><div class="card-content"><h2 class="h5 section-heading">ACs now</h2>${this._loads(status.loads || [])}</div></ha-card>
-            <ha-card><div class="card-content"><h2 class="h5 section-heading">Recent activity</h2>${this._history(status.history || [])}</div></ha-card>
+            <ha-card><div class="card-content">${this._sectionTitle("ACs now", "mdi:air-conditioner", "h2", "h5 mb-3")}${this._loads(status.loads || [])}</div></ha-card>
+            <ha-card><div class="card-content">${this._sectionTitle("Recent activity", "mdi:history", "h2", "h5 mb-3")}${this._history(status.history || [])}</div></ha-card>
           </div>
         </section>
       </div>`;
@@ -401,6 +580,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       button.addEventListener("click", () => this._setPause(Number(button.dataset.pauseMinutes)));
     });
     app.querySelector("#settings").addEventListener("submit", (event) => this._save(event));
+    app.querySelector("#save").addEventListener("click", (event) => this._save(event));
     app.querySelector("#add_load").addEventListener("click", () => this._addLoad());
     app.querySelectorAll("[data-remove-load]").forEach((button) => button.addEventListener("click", () => this._removeLoad(Number(button.dataset.removeLoad))));
   }
@@ -643,7 +823,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     };
   }
   async _save(event) {
-    event.preventDefault();
+    event?.preventDefault();
     const result = this._shadow.querySelector("#save_result");
     try {
       const options = this._collectOptions();
@@ -797,7 +977,7 @@ var SolarSpenderPanelHost = class extends HTMLElement {
     return this._options.loads.map((load, index) => {
       const capabilities = this._climateCapabilities(load.entity_id);
       return `<ha-card class="load-card mb-3" data-load-row="${index}"><div class="card-content">
-        <div class="d-flex justify-content-between align-items-center mb-3"><div><strong>${this._escape(this._hass?.states?.[load.entity_id]?.attributes?.friendly_name || `AC ${index + 1}`)}</strong><div class="small text-body-secondary">${this._escape(load.entity_id || "Choose an AC")}</div></div><button class="btn btn-sm btn-outline-danger" type="button" data-remove-load="${index}">Remove</button></div>
+        <div class="load-card-header d-flex justify-content-between align-items-center mb-3"><div class="text-break"><strong>${this._escape(this._hass?.states?.[load.entity_id]?.attributes?.friendly_name || `AC ${index + 1}`)}</strong><div class="small text-body-secondary">${this._escape(load.entity_id || "Choose an AC")}</div></div><ha-button data-remove-load="${index}"><ha-icon icon="mdi:delete-outline"></ha-icon>Remove</ha-button></div>
         <div class="row g-3">
           <div class="col-md-6">${this._label("AC entity")}<ha-selector data-load-index="${index}"></ha-selector>${this._help("The AC Solar Spender may control.")}</div>
           <div class="col-md-6">${this._label("Use this AC")}<ha-selector data-load-enabled-index="${index}"></ha-selector>${this._help("Turning this off does not turn off the AC.")}</div>
@@ -818,8 +998,11 @@ var SolarSpenderPanelHost = class extends HTMLElement {
   _loadSelect(index, key, label, help) {
     return `${this._label(label)}<ha-selector data-load-select-index="${index}" data-load-select-key="${key}"></ha-selector>${this._help(help)}`;
   }
-  _card(title, value, detail) {
-    return `<div class="col-12 col-sm-6 col-xl"><ha-card class="status-card"><div class="card-content"><div class="text-body-secondary small">${this._escape(title)}</div><div class="fs-4 fw-semibold">${this._escape(value)}</div><div class="small text-body-secondary text-break">${this._escape(detail)}</div></div></ha-card></div>`;
+  _sectionTitle(title, icon, level = "h2", className = "h5 mb-3") {
+    return `<${level} class="${className} section-heading section-title"><ha-icon icon="${icon}" aria-hidden="true"></ha-icon><span>${this._escape(title)}</span></${level}>`;
+  }
+  _card(title, value, detail, icon) {
+    return `<div class="col-12 col-sm-6 col-xl"><ha-card class="status-card"><div class="card-content"><div class="status-title text-body-secondary small"><ha-icon icon="${icon}" aria-hidden="true"></ha-icon><span>${this._escape(title)}</span></div><div class="fs-4 fw-semibold mt-1">${this._escape(value)}</div><div class="small text-body-secondary text-break">${this._escape(detail)}</div></div></ha-card></div>`;
   }
   _loads(loads) {
     return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => {
