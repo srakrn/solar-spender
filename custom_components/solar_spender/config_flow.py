@@ -44,7 +44,7 @@ def _number_selector(
 class SolarSpenderConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle setup of the singleton Solar Spender controller."""
 
-    VERSION = 5
+    VERSION = 6
 
     async def async_step_user(
         self,

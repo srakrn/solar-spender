@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from math import isfinite
 
 
 def input_is_fresh(
@@ -14,6 +15,90 @@ def input_is_fresh(
 ) -> bool:
     """Return whether a decision input remains within its configured age."""
     return reported_at is not None and now - reported_at <= maximum_age
+
+
+@dataclass(frozen=True, slots=True)
+class LoadPowerReading:
+    """A live per-load reading with derivative-silence semantics."""
+
+    value_w: float | None
+    assumed_zero: bool
+    age_seconds: float | None
+
+
+def load_power_reading(
+    value_w: float | None,
+    reported_at: datetime | None,
+    *,
+    now: datetime,
+    zero_after: timedelta,
+) -> LoadPowerReading:
+    """Return zero after a valid numeric load-power sensor stops reporting."""
+    if value_w is None or not isfinite(value_w) or value_w < 0:
+        return LoadPowerReading(None, False, None)
+    age_seconds = (
+        max(0.0, (now - reported_at).total_seconds())
+        if reported_at is not None
+        else None
+    )
+    if reported_at is not None and now - reported_at > zero_after:
+        return LoadPowerReading(0.0, True, age_seconds)
+    return LoadPowerReading(value_w, False, age_seconds)
+
+
+def effective_load_draw_w(
+    reading: LoadPowerReading,
+    *,
+    conservative_estimate_w: float | None,
+) -> float | None:
+    """Prefer a live or assumed-zero draw over a fallback estimate."""
+    if reading.value_w is not None:
+        return reading.value_w
+    return conservative_estimate_w
+
+
+def probe_fallback_power_w(
+    *,
+    grid_import_w: float,
+    grid_import_allowance_w: float,
+    battery_discharge_w: float,
+    battery_idle_threshold_w: float,
+) -> float:
+    """Return observable non-solar probe power above normal idle allowances."""
+    return max(0.0, grid_import_w - grid_import_allowance_w) + max(
+        0.0,
+        battery_discharge_w - battery_idle_threshold_w,
+    )
+
+
+def accumulate_fallback_energy_wh(
+    accumulated_wh: float,
+    *,
+    previous_power_w: float,
+    current_power_w: float,
+    elapsed_seconds: float,
+) -> float:
+    """Conservatively integrate irregular fallback-power reports."""
+    return accumulated_wh + (
+        max(0.0, previous_power_w, current_power_w)
+        * max(0.0, elapsed_seconds)
+        / 3600
+    )
+
+
+def worst_case_probe_energy_wh(
+    *,
+    expected_power_w: float,
+    settling_seconds: float,
+    minimum_on_seconds: float,
+    feedback_timeout_seconds: float,
+) -> float:
+    """Return the fallback budget needed through the fail-closed deadline."""
+    duration_seconds = (
+        max(0.0, settling_seconds, minimum_on_seconds)
+        + max(0.0, feedback_timeout_seconds)
+    )
+    return max(0.0, expected_power_w) * duration_seconds / 3600
 
 
 def append_bounded_event(

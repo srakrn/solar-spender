@@ -51,6 +51,23 @@ class ConfigurationSurfaceTests(unittest.TestCase):
 
         self.assertNotIn("feedback_sample_interval_minutes", exposed_sources)
 
+    def test_probe_limits_and_load_power_expiry_are_exposed(self) -> None:
+        backend = (
+            ROOT / "custom_components/solar_spender/models.py"
+        ).read_text()
+        panel = (
+            ROOT / "frontend/src/solar-spender-panel.js"
+        ).read_text()
+
+        for key in (
+            "probe_grid_import_allowance_w",
+            "probe_max_fallback_energy_wh",
+            "power_zero_after_minutes",
+        ):
+            with self.subTest(key=key):
+                self.assertIn(key, backend)
+                self.assertIn(key, panel)
+
 
 if __name__ == "__main__":
     unittest.main()

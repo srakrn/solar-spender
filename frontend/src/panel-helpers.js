@@ -79,6 +79,14 @@ export function loadOwnershipPresentation(load) {
   return { style: "secondary", label: "Not owned" };
 }
 
+export function loadPowerDescription(load) {
+  if (typeof load?.current_power_w !== "number") return "";
+  if (load.current_power_assumed_zero) {
+    return " · 0 W — no recent energy increment";
+  }
+  return ` · about ${Math.round(load.current_power_w)} W`;
+}
+
 export function statusPresentations(status, options) {
   const enabled = Boolean(status?.enabled);
   const paused = Boolean(status?.paused);

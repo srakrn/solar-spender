@@ -142,6 +142,133 @@ class InputFreshnessTests(unittest.TestCase):
         )
 
 
+class DerivedLoadPowerTests(unittest.TestCase):
+    """Verify silence from a derivative power sensor becomes an explicit zero."""
+
+    def test_valid_reading_is_fresh_through_timeout_boundary(self) -> None:
+        now = datetime(2026, 7, 24, 12, 15, tzinfo=UTC)
+
+        reading = FEEDBACK.load_power_reading(
+            850,
+            now - timedelta(minutes=15),
+            now=now,
+            zero_after=timedelta(minutes=15),
+        )
+
+        self.assertEqual(reading.value_w, 850)
+        self.assertFalse(reading.assumed_zero)
+        self.assertEqual(reading.age_seconds, 900)
+
+    def test_valid_reading_becomes_zero_after_timeout(self) -> None:
+        now = datetime(2026, 7, 24, 12, 15, tzinfo=UTC)
+
+        reading = FEEDBACK.load_power_reading(
+            850,
+            now - timedelta(minutes=15, seconds=1),
+            now=now,
+            zero_after=timedelta(minutes=15),
+        )
+
+        self.assertEqual(reading.value_w, 0)
+        self.assertTrue(reading.assumed_zero)
+
+    def test_new_same_value_report_refreshes_timeout(self) -> None:
+        now = datetime(2026, 7, 24, 12, 15, tzinfo=UTC)
+
+        reading = FEEDBACK.load_power_reading(
+            850,
+            now - timedelta(seconds=1),
+            now=now,
+            zero_after=timedelta(minutes=15),
+        )
+
+        self.assertEqual(reading.value_w, 850)
+        self.assertFalse(reading.assumed_zero)
+
+    def test_invalid_or_negative_power_is_not_assumed_zero(self) -> None:
+        now = datetime(2026, 7, 24, 12, 15, tzinfo=UTC)
+        for value in (None, -1):
+            with self.subTest(value=value):
+                reading = FEEDBACK.load_power_reading(
+                    value,
+                    now - timedelta(hours=1),
+                    now=now,
+                    zero_after=timedelta(minutes=15),
+                )
+                self.assertIsNone(reading.value_w)
+                self.assertFalse(reading.assumed_zero)
+
+    def test_assumed_zero_overrides_conservative_release_estimate(self) -> None:
+        reading = FEEDBACK.LoadPowerReading(0, True, 901)
+
+        self.assertEqual(
+            FEEDBACK.effective_load_draw_w(
+                reading,
+                conservative_estimate_w=1200,
+            ),
+            0,
+        )
+
+    def test_unavailable_live_power_falls_back_to_estimate(self) -> None:
+        reading = FEEDBACK.LoadPowerReading(None, False, None)
+
+        self.assertEqual(
+            FEEDBACK.effective_load_draw_w(
+                reading,
+                conservative_estimate_w=1200,
+            ),
+            1200,
+        )
+
+
+class ProbeFallbackTests(unittest.TestCase):
+    """Verify conservative power and energy accounting for zero-export probes."""
+
+    def test_idle_allowances_do_not_count_as_fallback(self) -> None:
+        self.assertEqual(
+            FEEDBACK.probe_fallback_power_w(
+                grid_import_w=40,
+                grid_import_allowance_w=50,
+                battery_discharge_w=20,
+                battery_idle_threshold_w=50,
+            ),
+            0,
+        )
+
+    def test_excess_grid_and_battery_power_are_added(self) -> None:
+        self.assertEqual(
+            FEEDBACK.probe_fallback_power_w(
+                grid_import_w=250,
+                grid_import_allowance_w=50,
+                battery_discharge_w=150,
+                battery_idle_threshold_w=50,
+            ),
+            300,
+        )
+
+    def test_irregular_interval_uses_the_larger_endpoint(self) -> None:
+        self.assertAlmostEqual(
+            FEEDBACK.accumulate_fallback_energy_wh(
+                1,
+                previous_power_w=100,
+                current_power_w=200,
+                elapsed_seconds=18,
+            ),
+            2,
+        )
+
+    def test_preflight_covers_settling_or_minimum_on_plus_timeout(self) -> None:
+        self.assertAlmostEqual(
+            FEEDBACK.worst_case_probe_energy_wh(
+                expected_power_w=900,
+                settling_seconds=300,
+                minimum_on_seconds=600,
+                feedback_timeout_seconds=900,
+            ),
+            375,
+        )
+
+
 class EventHistoryTests(unittest.TestCase):
     """Verify repeated reconciliation reasons do not bury useful history."""
 

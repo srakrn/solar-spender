@@ -1,6 +1,6 @@
 # Solar Spender — Product and Implementation Plan
 
-Status: irregular-report feedback and bounded input freshness implemented
+Status: bounded zero-export fallback and derived-load-power expiry implemented
 Initial scope: Home Assistant custom integration with a sidebar panel and
 `climate` loads
 
@@ -153,6 +153,12 @@ entry deficit, higher exit deficit, and a separate minimum-production guard.
 Schema v5 removes fixed spacing between feedback checks. It adds a bounded
 confirmation timeout and maximum source/battery input age so irregular reports
 remain usable without allowing confirmation or cached values to wait forever.
+Schema v6 requires numeric grid and battery feedback for zero-export probes,
+adds an explicit background grid-import allowance and fallback-energy budget,
+and disables existing zero-export entries until those limits are confirmed.
+Each optional AC power sensor also receives a configurable assume-zero timeout
+for derivative sensors whose cumulative-energy source stops reporting at zero
+load.
 
 The runtime timing controls are also exposed under one Solar Spender device as
 Home Assistant entities: an Automation switch and number entities for first
@@ -203,9 +209,9 @@ contains:
 - minimum PV production while the battery is full and idle;
 - a maximum entry deficit and a larger exit deficit, where
   `deficit_w = consumption_w - production_w`;
-- optional signed grid-flow power, strongly recommended;
-- optional battery charge/discharge power;
-- maximum tolerated grid import and battery discharge during a probe;
+- signed grid-flow power, required for probe feedback;
+- signed battery charge/discharge power, required for probe feedback;
+- an absolute background grid-import allowance and battery idle deadband;
 - maximum fallback energy per probe;
 - startup allowance and measurement settling duration;
 - probe retry backoff.

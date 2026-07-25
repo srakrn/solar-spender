@@ -46,8 +46,14 @@ from .feedback import (
     CycleMemory,
     FeedbackAssessment,
     LearnedDrawEstimate,
+    LoadPowerReading,
+    accumulate_fallback_energy_wh,
     append_bounded_event,
+    effective_load_draw_w,
     input_is_fresh,
+    load_power_reading,
+    probe_fallback_power_w,
+    worst_case_probe_energy_wh,
 )
 from .models import LoadConfig, SolarSpenderConfig
 from .selection import best_to_release_for_shortfall, first_to_activate
@@ -76,6 +82,17 @@ class Lease:
     previous_profile: dict[str, Any]
 
 
+@dataclass(slots=True)
+class ProbeRuntime:
+    """Persisted fallback accounting for one zero-export activation."""
+
+    load_entity_id: str
+    started_at: datetime
+    accumulated_energy_wh: float
+    last_sample_at: datetime
+    last_fallback_power_w: float
+
+
 class SolarSpenderController:
     """Own subscriptions, hysteresis, climate leases, and reconciliation."""
 
@@ -90,6 +107,7 @@ class SolarSpenderController:
         self.battery_allowed = config.battery_policy == BATTERY_DISABLED
         self.battery_direction = "not_configured"
         self.battery_power_w: float | None = None
+        self.grid_import_w: float | None = None
         self.reason = "off" if not config.enabled else "waiting for solar sensors"
         self.raw_source_value: str | float | None = None
         self.source_valid = False
@@ -109,6 +127,9 @@ class SolarSpenderController:
         self._scheduled: Callable[[], None] | None = None
         self._feedback_timeout_scheduled: Callable[[], None] | None = None
         self._input_expiry_scheduled: Callable[[], None] | None = None
+        self._load_power_expiry_scheduled: Callable[[], None] | None = None
+        self._probe_budget_expiry_scheduled: Callable[[], None] | None = None
+        self._probe_runtime: ProbeRuntime | None = None
         self._reconciling = False
         self._event_history: list[dict[str, str]] = []
         self._learning_store = LearningStore(hass, entry_id)
@@ -132,7 +153,7 @@ class SolarSpenderController:
             self._unsubscribers.append(
                 async_track_state_change_event(self.hass, entity_ids, self._async_state_changed)
             )
-        if self._feedback_entity_ids:
+        if self._feedback_entity_ids or self._load_power_entity_ids:
             self._unsubscribers.append(
                 self.hass.bus.async_listen(
                     EVENT_STATE_REPORTED,
@@ -140,7 +161,11 @@ class SolarSpenderController:
                     event_filter=self._is_feedback_report,
                 )
             )
-        if self._leases and not self._pause_is_active():
+        if (
+            self._leases
+            and self._probe_runtime is None
+            and not self._pause_is_active()
+        ):
             self._begin_recovery_feedback("restored leases")
             self._record(
                 f"Restored {len(self._leases)} owned AC(s). "
@@ -157,6 +182,8 @@ class SolarSpenderController:
                 )
             )
         self._schedule_input_expiry()
+        self._schedule_load_power_expiry()
+        self._schedule_probe_budget_expiry()
         await self.async_reconcile("started")
 
     async def async_stop(self) -> None:
@@ -173,12 +200,20 @@ class SolarSpenderController:
         if self._input_expiry_scheduled is not None:
             self._input_expiry_scheduled()
             self._input_expiry_scheduled = None
+        if self._load_power_expiry_scheduled is not None:
+            self._load_power_expiry_scheduled()
+            self._load_power_expiry_scheduled = None
+        if self._probe_budget_expiry_scheduled is not None:
+            self._probe_budget_expiry_scheduled()
+            self._probe_budget_expiry_scheduled = None
         await self._runtime_store.async_save(self._runtime_payload())
 
     async def async_apply_runtime_config(self, config: SolarSpenderConfig) -> None:
         """Apply options exposed as entities without dropping active leases."""
         self.config = config
         self._schedule_input_expiry()
+        self._schedule_load_power_expiry()
+        self._schedule_probe_budget_expiry()
         if self._feedback_assessment is not None:
             assessment = self._feedback_assessment
             assessment.deadline = assessment.next_not_before + timedelta(
@@ -186,6 +221,10 @@ class SolarSpenderController:
             )
             self._set_feedback_assessment(assessment)
         if not config.enabled:
+            if self._probe_runtime is not None:
+                self._pending_unsupported_release = (
+                    self._probe_runtime.load_entity_id
+                )
             self._paused_until = None
             self._paused_feedback_assessment = None
             self._resume_requires_recovery = False
@@ -257,19 +296,35 @@ class SolarSpenderController:
             )
             self._feedback_reports[entity_id] = reported_at
             self._schedule_input_expiry()
+        if entity_id in self._load_power_entity_ids:
+            self._schedule_load_power_expiry()
         self.hass.async_create_task(self.async_reconcile(f"state changed: {entity_id}"))
 
     @callback
     def _is_feedback_report(self, event_data: dict[str, Any]) -> bool:
         """Limit the high-volume state_reported event to configured feedback."""
-        return event_data.get("entity_id") in self._feedback_entity_ids
+        return event_data.get("entity_id") in (
+            self._feedback_entity_ids | self._load_power_entity_ids
+        )
 
     @callback
     def _async_state_reported(self, event: Event) -> None:
         entity_id = event.data["entity_id"]
-        self._feedback_reports[entity_id] = event.data["last_reported"]
-        self._schedule_input_expiry()
+        if entity_id in self._feedback_entity_ids:
+            self._feedback_reports[entity_id] = event.data["last_reported"]
+            self._schedule_input_expiry()
+        if entity_id in self._load_power_entity_ids:
+            self._schedule_load_power_expiry()
         self.hass.async_create_task(self.async_reconcile(f"state reported: {entity_id}"))
+
+    @property
+    def _load_power_entity_ids(self) -> frozenset[str]:
+        """Return optional per-load power entities with silence semantics."""
+        return frozenset(
+            load.power_entity_id
+            for load in self.config.loads
+            if load.power_entity_id
+        )
 
     def _watched_entities(self) -> set[str]:
         config = self.config
@@ -287,7 +342,10 @@ class SolarSpenderController:
 
     def _feedback_entities(self) -> frozenset[str]:
         """Return entities that must report freshly after every load change."""
-        return self._source_entities() | self._battery_entities()
+        values = self._source_entities() | self._battery_entities()
+        if self.config.source_type == SOURCE_CURTAILED:
+            values |= frozenset({self.config.grid_entity_id})
+        return frozenset(value for value in values if value)
 
     def _source_entities(self) -> frozenset[str]:
         """Return source entities whose age determines source validity."""
@@ -335,8 +393,27 @@ class SolarSpenderController:
             self._update_inputs()
             self._relinquish_manual_overrides()
             self._confirm_pending_activation()
+            self._update_probe_accounting(now)
             if not self.config.enabled:
                 self._set_state(STATE_DISABLED, "disabled")
+                return
+            if (
+                self._probe_runtime is not None
+                and self._probe_runtime.accumulated_energy_wh
+                >= self.config.probe_max_fallback_energy_wh
+            ):
+                entity_id = self._probe_runtime.load_entity_id
+                if (
+                    self._feedback_assessment is not None
+                    and self._feedback_assessment.action == "activation"
+                    and self._feedback_assessment.load_entity_id == entity_id
+                ):
+                    self._take_feedback_assessment()
+                self._mark_unsupported_activation(entity_id, global_block=True)
+                await self._async_shed_one(
+                    "the probe used its fallback energy budget",
+                    target_entity_id=entity_id,
+                )
                 return
             if (
                 self._feedback_assessment is not None
@@ -414,7 +491,7 @@ class SolarSpenderController:
                     )
                     return
                 assessment.record_vote(
-                    supported=self.surplus_available,
+                    supported=self._feedback_vote_supported(),
                     reports=self._feedback_reports,
                     measurement_w=self._power_value(
                         self.config.consumption_entity_id
@@ -439,6 +516,7 @@ class SolarSpenderController:
                     if assessment.supported:
                         self._record_combination(True)
                         await self._async_learn_draw(assessment)
+                        self._clear_probe_runtime()
                 else:
                     self._record_combination(True)
                 if assessment.action == "activation" and not assessment.supported:
@@ -525,8 +603,62 @@ class SolarSpenderController:
     def _update_inputs(self) -> None:
         self._update_source()
         self.battery_allowed, battery_reason = self._battery_allows_activation()
+        self._update_probe_grid_import()
+        if (
+            self.config.source_type == SOURCE_CURTAILED
+            and self.grid_import_w is None
+        ):
+            self.battery_allowed = False
+            battery_reason = "grid power sensor is unavailable or stale"
         if not self.battery_allowed:
             self.reason = battery_reason
+
+    def _update_probe_grid_import(self) -> None:
+        """Normalize optional/required grid feedback to import-positive watts."""
+        self.grid_import_w = None
+        if self.config.source_type != SOURCE_CURTAILED:
+            return
+        watts = self._power_value(
+            self.config.grid_entity_id,
+            require_fresh=True,
+        )
+        if watts is None:
+            return
+        export_w = watts if self.config.grid_export_positive else -watts
+        self.grid_import_w = max(0.0, -export_w)
+
+    def _battery_discharge_w(self) -> float | None:
+        """Return normalized battery discharge power when numerically known."""
+        if self.battery_power_w is None:
+            return None
+        return max(0.0, -self.battery_power_w)
+
+    def _current_probe_fallback_power_w(self) -> float | None:
+        """Return observable probe fallback power above configured allowances."""
+        battery_discharge_w = self._battery_discharge_w()
+        if self.grid_import_w is None or battery_discharge_w is None:
+            return None
+        return probe_fallback_power_w(
+            grid_import_w=self.grid_import_w,
+            grid_import_allowance_w=self.config.probe_grid_import_allowance_w,
+            battery_discharge_w=battery_discharge_w,
+            battery_idle_threshold_w=self.config.battery_power_threshold_w,
+        )
+
+    def _feedback_vote_supported(self) -> bool:
+        """Apply source and settled probe evidence to one feedback vote."""
+        if self.config.source_type != SOURCE_CURTAILED:
+            return self.surplus_available
+        battery_discharge_w = self._battery_discharge_w()
+        return (
+            self.surplus_available
+            and self.grid_import_w is not None
+            and self.grid_import_w
+            <= self.config.probe_grid_import_allowance_w
+            and battery_discharge_w is not None
+            and battery_discharge_w
+            <= self.config.battery_power_threshold_w
+        )
 
     def _update_source(self) -> None:
         config = self.config
@@ -807,10 +939,37 @@ class SolarSpenderController:
             )
             if not self._cycle_memory.fits_upper_bound(candidate_total_w):
                 continue
+            if (
+                self.config.source_type == SOURCE_CURTAILED
+                and not self._probe_preflight_fits(load)
+            ):
+                continue
             candidates.append(load)
         # ``candidates`` retains configuration order, so Python's stable
         # minimum gives equally prioritized loads a predictable tie-break.
         return first_to_activate(candidates, lambda load: load.priority)
+
+    def _probe_preflight_fits(self, load: LoadConfig) -> bool:
+        """Require the configured budget to cover a fail-closed probe."""
+        required_wh = self._probe_preflight_energy_wh(load)
+        return (
+            required_wh is not None
+            and required_wh <= self.config.probe_max_fallback_energy_wh
+        )
+
+    def _probe_preflight_energy_wh(
+        self,
+        load: LoadConfig,
+    ) -> float | None:
+        """Return the conservative fallback energy required by one load."""
+        if load.expected_power_w is None:
+            return None
+        return worst_case_probe_energy_wh(
+            expected_power_w=load.expected_power_w,
+            settling_seconds=self.config.settling_seconds,
+            minimum_on_seconds=load.min_on_seconds,
+            feedback_timeout_seconds=self.config.feedback_timeout_minutes * 60,
+        )
 
     async def _async_activate_load(self, load: LoadConfig) -> None:
         previous_profile = self._capture_profile(load.entity_id)
@@ -852,6 +1011,16 @@ class SolarSpenderController:
             profile["fan_mode"] = load.fan_mode
         self._pending_activation = (load, profile, previous_profile)
         action_completed_at = datetime.now().astimezone()
+        if self.config.source_type == SOURCE_CURTAILED:
+            fallback_power_w = self._current_probe_fallback_power_w() or 0.0
+            self._probe_runtime = ProbeRuntime(
+                load_entity_id=load.entity_id,
+                started_at=action_completed_at,
+                accumulated_energy_wh=0.0,
+                last_sample_at=action_completed_at,
+                last_fallback_power_w=fallback_power_w,
+            )
+            self._schedule_probe_budget_expiry()
         self._begin_feedback_assessment(
             "activation",
             load.entity_id,
@@ -877,6 +1046,7 @@ class SolarSpenderController:
                 and self._feedback_assessment.load_entity_id == load.entity_id
             ):
                 self._clear_feedback_assessment()
+            self._clear_probe_runtime(load.entity_id)
             self._record(f"{load.entity_id} did not turn on.")
             return
         activated_at = datetime.now().astimezone()
@@ -968,6 +1138,7 @@ class SolarSpenderController:
             return
         await self._async_restore_profile(lease)
         self._leases.pop(lease.load.entity_id, None)
+        self._clear_probe_runtime(lease.load.entity_id)
         if self._pending_unsupported_release == lease.load.entity_id:
             self._pending_unsupported_release = None
         self._last_off[lease.load.entity_id] = now
@@ -1064,11 +1235,29 @@ class SolarSpenderController:
 
     def _current_release_draw_w(self, load: LoadConfig) -> float | None:
         """Prefer a valid non-negative AC draw, then use its estimate."""
-        if load.power_entity_id:
-            live_w = self._power_value(load.power_entity_id)
-            if live_w is not None and live_w >= 0:
-                return live_w
-        return self._expected_draws().get(load.entity_id)
+        return effective_load_draw_w(
+            self._load_power_reading(load),
+            conservative_estimate_w=self._expected_draws().get(
+                load.entity_id
+            ),
+        )
+
+    def _load_power_reading(
+        self,
+        load: LoadConfig,
+        now: datetime | None = None,
+    ) -> LoadPowerReading:
+        """Resolve one optional live power sensor, including silent zero."""
+        if not load.power_entity_id:
+            return LoadPowerReading(None, False, None)
+        state = self.hass.states.get(load.power_entity_id)
+        value_w = self._power_value(load.power_entity_id)
+        return load_power_reading(
+            value_w,
+            state.last_reported if state is not None else None,
+            now=now or datetime.now().astimezone(),
+            zero_after=timedelta(minutes=load.power_zero_after_minutes),
+        )
 
     def _release_shortfall_w(self) -> float:
         """Return the currently observable watts that load removal should cover."""
@@ -1180,12 +1369,14 @@ class SolarSpenderController:
             state = self.hass.states.get(entity_id)
             if state is None or state.state in _INVALID_STATES or state.state == STATE_OFF:
                 self._leases.pop(entity_id, None)
+                self._clear_probe_runtime(entity_id)
                 self._record(
                     f"{entity_id} is no longer owned because it was turned off."
                 )
                 continue
             if lease.load.hvac_mode is not None and state.state != lease.load.hvac_mode:
                 self._leases.pop(entity_id, None)
+                self._clear_probe_runtime(entity_id)
                 self._record(
                     f"{entity_id} is no longer owned because its mode changed."
                 )
@@ -1194,6 +1385,7 @@ class SolarSpenderController:
                 actual = state.attributes.get(ATTR_TEMPERATURE)
                 if actual is not None and abs(float(actual) - lease.load.temperature) > 0.1:
                     self._leases.pop(entity_id, None)
+                    self._clear_probe_runtime(entity_id)
                     self._record(
                         f"{entity_id} is no longer owned because its temperature changed."
                     )
@@ -1203,6 +1395,7 @@ class SolarSpenderController:
                 and state.attributes.get("fan_mode") != lease.load.fan_mode
             ):
                 self._leases.pop(entity_id, None)
+                self._clear_probe_runtime(entity_id)
                 self._record(
                     f"{entity_id} is no longer owned because its fan changed."
                 )
@@ -1320,6 +1513,112 @@ class SolarSpenderController:
             self._async_input_expired,
         )
 
+    def _schedule_load_power_expiry(self) -> None:
+        """Reconcile when a valid per-load derivative reading becomes zero."""
+        if self._load_power_expiry_scheduled is not None:
+            self._load_power_expiry_scheduled()
+            self._load_power_expiry_scheduled = None
+        now = datetime.now().astimezone()
+        deadlines: list[datetime] = []
+        for load in self.config.loads:
+            if not load.power_entity_id:
+                continue
+            state = self.hass.states.get(load.power_entity_id)
+            value_w = self._power_value(load.power_entity_id)
+            if state is None or value_w is None or value_w < 0:
+                continue
+            deadline = state.last_reported + timedelta(
+                minutes=load.power_zero_after_minutes
+            ) + timedelta(microseconds=1)
+            if deadline > now:
+                deadlines.append(deadline)
+        if not deadlines:
+            return
+        delay = max(0.0, (min(deadlines) - now).total_seconds())
+        self._load_power_expiry_scheduled = async_call_later(
+            self.hass,
+            delay,
+            self._async_load_power_expired,
+        )
+
+    @callback
+    def _async_load_power_expired(self, _now: datetime) -> None:
+        self._load_power_expiry_scheduled = None
+        self._schedule_load_power_expiry()
+        self.hass.async_create_task(
+            self.async_reconcile("AC power assume-zero time expired")
+        )
+
+    def _update_probe_accounting(self, now: datetime) -> None:
+        """Accumulate bounded fallback energy for the active probe."""
+        runtime = self._probe_runtime
+        if runtime is None:
+            return
+        current_power_w = self._current_probe_fallback_power_w()
+        if current_power_w is None:
+            self._schedule_probe_budget_expiry()
+            return
+        runtime.accumulated_energy_wh = accumulate_fallback_energy_wh(
+            runtime.accumulated_energy_wh,
+            previous_power_w=runtime.last_fallback_power_w,
+            current_power_w=current_power_w,
+            elapsed_seconds=max(
+                0.0,
+                (now - runtime.last_sample_at).total_seconds(),
+            ),
+        )
+        runtime.last_sample_at = now
+        runtime.last_fallback_power_w = current_power_w
+        self._runtime_store.async_delay_save(self._runtime_payload)
+        self._schedule_probe_budget_expiry()
+
+    def _schedule_probe_budget_expiry(self) -> None:
+        """Reconcile when steady fallback power would exhaust the budget."""
+        if self._probe_budget_expiry_scheduled is not None:
+            self._probe_budget_expiry_scheduled()
+            self._probe_budget_expiry_scheduled = None
+        runtime = self._probe_runtime
+        if (
+            runtime is None
+            or not self.config.enabled
+            or self.config.probe_max_fallback_energy_wh <= 0
+            or runtime.last_fallback_power_w <= 0
+        ):
+            return
+        remaining_wh = max(
+            0.0,
+            self.config.probe_max_fallback_energy_wh
+            - runtime.accumulated_energy_wh,
+        )
+        delay = remaining_wh * 3600 / runtime.last_fallback_power_w
+        self._probe_budget_expiry_scheduled = async_call_later(
+            self.hass,
+            max(0.0, delay),
+            self._async_probe_budget_expired,
+        )
+
+    @callback
+    def _async_probe_budget_expired(self, _now: datetime) -> None:
+        self._probe_budget_expiry_scheduled = None
+        self.hass.async_create_task(
+            self.async_reconcile("probe fallback budget deadline")
+        )
+
+    def _clear_probe_runtime(self, entity_id: str | None = None) -> None:
+        """Forget completed probe accounting without affecting other loads."""
+        if (
+            self._probe_runtime is None
+            or (
+                entity_id is not None
+                and self._probe_runtime.load_entity_id != entity_id
+            )
+        ):
+            return
+        self._probe_runtime = None
+        if self._probe_budget_expiry_scheduled is not None:
+            self._probe_budget_expiry_scheduled()
+            self._probe_budget_expiry_scheduled = None
+
     @callback
     def _async_input_expired(self, _now: datetime) -> None:
         self._input_expiry_scheduled = None
@@ -1421,6 +1720,23 @@ class SolarSpenderController:
                 "upper_unsupported_w": self._cycle_memory.upper_unsupported_w,
             },
             "pending_unsupported_release": self._pending_unsupported_release,
+            "probe_runtime": (
+                {
+                    "load_entity_id": self._probe_runtime.load_entity_id,
+                    "started_at": self._probe_runtime.started_at.isoformat(),
+                    "accumulated_energy_wh": (
+                        self._probe_runtime.accumulated_energy_wh
+                    ),
+                    "last_sample_at": (
+                        self._probe_runtime.last_sample_at.isoformat()
+                    ),
+                    "last_fallback_power_w": (
+                        self._probe_runtime.last_fallback_power_w
+                    ),
+                }
+                if self._probe_runtime is not None
+                else None
+            ),
             "paused_until": (
                 self._paused_until.isoformat()
                 if self._paused_until is not None
@@ -1555,9 +1871,48 @@ class SolarSpenderController:
         pending_release = data.get("pending_unsupported_release")
         if isinstance(pending_release, str) and pending_release in self._leases:
             self._pending_unsupported_release = pending_release
+        probe_runtime = data.get("probe_runtime")
+        if isinstance(probe_runtime, dict):
+            load_entity_id = probe_runtime.get("load_entity_id")
+            started_at = parse_aware_datetime(probe_runtime.get("started_at"))
+            last_sample_at = parse_aware_datetime(
+                probe_runtime.get("last_sample_at")
+            )
+            accumulated_energy_wh = probe_runtime.get(
+                "accumulated_energy_wh"
+            )
+            last_fallback_power_w = probe_runtime.get(
+                "last_fallback_power_w"
+            )
+            if (
+                isinstance(load_entity_id, str)
+                and load_entity_id in self._leases
+                and started_at is not None
+                and last_sample_at is not None
+                and isinstance(accumulated_energy_wh, (int, float))
+                and isfinite(accumulated_energy_wh)
+                and accumulated_energy_wh >= 0
+                and isinstance(last_fallback_power_w, (int, float))
+                and isfinite(last_fallback_power_w)
+                and last_fallback_power_w >= 0
+            ):
+                self._probe_runtime = ProbeRuntime(
+                    load_entity_id=load_entity_id,
+                    started_at=started_at,
+                    accumulated_energy_wh=float(accumulated_energy_wh),
+                    last_sample_at=last_sample_at,
+                    last_fallback_power_w=float(last_fallback_power_w),
+                )
+                self._pending_unsupported_release = load_entity_id
+                self._record(
+                    f"Recovered an interrupted probe for {load_entity_id}; "
+                    "it will be released safely."
+                )
 
     def _load_status(self, load: LoadConfig) -> dict[str, Any]:
         """Explain ownership and current eligibility for one configured AC."""
+        now = datetime.now().astimezone()
+        power = self._load_power_reading(load, now)
         state = self.hass.states.get(load.entity_id)
         state_value = state.state if state is not None else None
         owned = load.entity_id in self._leases
@@ -1585,6 +1940,16 @@ class SolarSpenderController:
             )
         elif blocked_for_cycle:
             ownership_reason = "Blocked for now"
+        elif (
+            self.config.source_type == SOURCE_CURTAILED
+            and not self._probe_preflight_fits(load)
+        ):
+            required_wh = self._probe_preflight_energy_wh(load)
+            ownership_reason = (
+                f"Fallback budget must cover {required_wh:.1f} Wh"
+                if required_wh is not None
+                else "Set usual power before zero-export testing"
+            )
         else:
             last_off = self._last_off.get(load.entity_id)
             minimum_off_until = (
@@ -1594,7 +1959,7 @@ class SolarSpenderController:
             )
             if (
                 minimum_off_until is not None
-                and datetime.now().astimezone() < minimum_off_until
+                and now < minimum_off_until
             ):
                 ownership_reason = (
                     "Waiting for its minimum off time"
@@ -1612,7 +1977,9 @@ class SolarSpenderController:
             "effective_expected_power_w": self._expected_draws().get(
                 load.entity_id
             ),
-            "current_power_w": self._current_release_draw_w(load),
+            "current_power_w": power.value_w,
+            "current_power_assumed_zero": power.assumed_zero,
+            "current_power_age_seconds": power.age_seconds,
             "power_entity_id": load.power_entity_id,
             "learned_draw_samples": (
                 self._learned_draws[load.entity_id].samples
@@ -1630,6 +1997,14 @@ class SolarSpenderController:
             feedback_assessment.pending_entities(self._feedback_reports)
             if feedback_assessment is not None
             else frozenset()
+        )
+        probe_runtime = self._probe_runtime
+        battery_discharge_w = self._battery_discharge_w()
+        fallback_power_w = self._current_probe_fallback_power_w()
+        fallback_energy_wh = (
+            probe_runtime.accumulated_energy_wh
+            if probe_runtime is not None
+            else 0.0
         )
         return {
             "entry_id": self.entry_id,
@@ -1666,6 +2041,29 @@ class SolarSpenderController:
             "battery_allowed": self.battery_allowed,
             "battery_direction": self.battery_direction,
             "battery_power_w": self.battery_power_w,
+            "probe": {
+                "active": probe_runtime is not None,
+                "load_entity_id": (
+                    probe_runtime.load_entity_id
+                    if probe_runtime is not None
+                    else None
+                ),
+                "grid_import_w": self.grid_import_w,
+                "grid_import_allowance_w": (
+                    self.config.probe_grid_import_allowance_w
+                ),
+                "battery_discharge_w": battery_discharge_w,
+                "fallback_power_w": fallback_power_w,
+                "fallback_energy_wh": fallback_energy_wh,
+                "fallback_energy_limit_wh": (
+                    self.config.probe_max_fallback_energy_wh
+                ),
+                "fallback_energy_remaining_wh": max(
+                    0.0,
+                    self.config.probe_max_fallback_energy_wh
+                    - fallback_energy_wh,
+                ),
+            },
             "owned_loads": [
                 {"entity_id": lease.load.entity_id, "activated_at": lease.activated_at.isoformat()}
                 for lease in self._leases.values()

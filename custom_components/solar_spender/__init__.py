@@ -25,7 +25,7 @@ from .const import (
     RUNTIME_OPTIONS_UPDATED,
 )
 from .controller import SolarSpenderController
-from .migration import version_4_options, version_5_options
+from .migration import version_4_options, version_5_options, version_6_options
 from .models import SolarSpenderConfig
 from .websocket_api import async_register_websocket_api
 
@@ -54,22 +54,24 @@ async def async_migrate_entry(
     entry: SolarSpenderConfigEntry,
 ) -> bool:
     """Migrate saved options without changing the user's AC order."""
-    if entry.version < 5:
+    if entry.version < 6:
         options = dict(entry.options)
         if entry.version < 4:
             options = version_4_options(options)
-        options = version_5_options(options)
-        entity_registry = er.async_get(hass)
-        if entity_id := entity_registry.async_get_entity_id(
-            "number",
-            DOMAIN,
-            f"{entry.entry_id}_feedback_sample_interval_minutes",
-        ):
-            entity_registry.async_remove(entity_id)
+        if entry.version < 5:
+            options = version_5_options(options)
+            entity_registry = er.async_get(hass)
+            if entity_id := entity_registry.async_get_entity_id(
+                "number",
+                DOMAIN,
+                f"{entry.entry_id}_feedback_sample_interval_minutes",
+            ):
+                entity_registry.async_remove(entity_id)
+        options = version_6_options(options)
         hass.config_entries.async_update_entry(
             entry,
             options=options,
-            version=5,
+            version=6,
         )
     return True
 

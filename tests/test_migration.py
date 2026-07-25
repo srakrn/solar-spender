@@ -75,6 +75,18 @@ class ConfigurationMigrationTests(unittest.TestCase):
 
         self.assertEqual(migrated["battery_direction_source"], "status")
 
+    def test_current_options_normalize_new_nested_defaults(self) -> None:
+        normalized = MIGRATION.current_options(
+            {"loads": [{"entity_id": "climate.first"}]}
+        )
+
+        self.assertEqual(
+            normalized["loads"][0]["power_zero_after_minutes"],
+            15,
+        )
+        self.assertEqual(normalized["probe_grid_import_allowance_w"], 0)
+        self.assertEqual(normalized["probe_max_fallback_energy_wh"], 0)
+
     def test_zero_export_thresholds_migrate_to_deficit_hysteresis(self) -> None:
         migrated = MIGRATION.version_4_options(
             {
@@ -102,3 +114,37 @@ class ConfigurationMigrationTests(unittest.TestCase):
         self.assertEqual(migrated["feedback_timeout_minutes"], 15)
         self.assertEqual(migrated["input_max_age_minutes"], 15)
         self.assertEqual(migrated["feedback_sample_count"], 3)
+
+    def test_zero_export_probe_limits_require_confirmation_after_v6(self) -> None:
+        options = {
+            "enabled": True,
+            "source_type": "curtailed_production",
+            "grid_entity_id": "sensor.grid",
+            "loads": [
+                {
+                    "entity_id": "climate.first",
+                    "expected_power_w": 900,
+                }
+            ],
+        }
+
+        migrated = MIGRATION.version_6_options(options)
+
+        self.assertFalse(migrated["enabled"])
+        self.assertEqual(migrated["probe_grid_import_allowance_w"], 0)
+        self.assertEqual(migrated["probe_max_fallback_energy_wh"], 0)
+        self.assertEqual(
+            migrated["loads"][0]["power_zero_after_minutes"],
+            15,
+        )
+
+    def test_v6_preserves_non_curtailed_enabled_state(self) -> None:
+        migrated = MIGRATION.version_6_options(
+            {
+                "enabled": True,
+                "source_type": "grid_flow",
+                "loads": [],
+            }
+        )
+
+        self.assertTrue(migrated["enabled"])

@@ -158,6 +158,8 @@ def _validate_configured_entities(
             _validate_power_entity(hass, config.production_entity_id)
         if config.consumption_entity_id:
             _validate_power_entity(hass, config.consumption_entity_id)
+        if config.source_type == SOURCE_CURTAILED and config.grid_entity_id:
+            _validate_power_entity(hass, config.grid_entity_id)
 
     for load in config.loads:
         if load.enabled and load.power_entity_id:

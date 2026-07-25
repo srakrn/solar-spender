@@ -48,6 +48,20 @@ from Settings → Devices & services, and configure it from the sidebar panel.
 The initial config entry is disabled. It will not command climate entities until
 valid source and load options are saved and automation is enabled.
 
+## Upgrading to 0.9.0
+
+Schema v6 adds measured grid/battery fallback accounting for zero-export
+probes. Existing zero-export configurations are disabled during migration so
+the grid-import allowance, fallback-energy budget, battery power sensor, and
+conservative usual power for each enabled AC can be reviewed before automation
+is turned on again.
+
+Optional per-AC power sensors now have an “Assume zero after” setting, defaulting
+to 15 minutes. This supports power sensors derived from cumulative Wh counters:
+when a valid numeric reading stops reporting beyond that interval, Solar
+Spender treats current draw as 0 W without treating stale source or battery
+feedback as valid.
+
 ## Upgrading to 0.8.0
 
 Schema v5 removes the fixed “wait between checks” setting. Existing entries
@@ -82,6 +96,9 @@ integration's Configure dialog.
 - An AC already on is not adopted or released.
 - A manual mode or setpoint change relinquishes Solar Spender ownership.
 - Zero-export solar testing requires a configured full-and-idle battery gate.
+- Zero-export tests require fresh signed grid and battery power. Background grid
+  import is allowed only up to its configured ceiling, and measured excess grid
+  plus battery energy is bounded per probe.
 - Battery direction can use a status entity or a signed W/kW power sensor with
   a configurable idle threshold.
 - Waste headroom is off while a configured battery is charging, discharging, or
@@ -92,6 +109,9 @@ integration's Configure dialog.
 - Confirmed ownership leases, timing deadlines, cycle blocks, and recent
   decisions survive restart. A lease is recovered only if the AC still matches
   Solar Spender's exact commanded profile; ambiguous ACs are left untouched.
+- A valid per-AC power reading derived from cumulative energy becomes an
+  explicit 0 W after its configured silence timeout; source and battery
+  readings never receive that exception.
 - A timed pause survives restart, ignores short household peaks, never starts or
   releases an AC, and discards any confirmation sequence interrupted by the
   pause.

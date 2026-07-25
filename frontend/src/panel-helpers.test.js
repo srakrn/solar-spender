@@ -7,6 +7,7 @@ import {
   batteryConfigurationVisibility,
   batteryPolicyDescription,
   constrainNumberValue,
+  loadPowerDescription,
   loadOwnershipPresentation,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
@@ -163,6 +164,23 @@ test("load ownership presentation distinguishes eligible, disabled, and manual l
   assert.equal(
     loadOwnershipPresentation({ can_be_owned: false, enabled: true, owned: false }).label,
     "Not owned",
+  );
+});
+
+test("derived AC power explains an assumed zero", () => {
+  assert.equal(
+    loadPowerDescription({
+      current_power_w: 0,
+      current_power_assumed_zero: true,
+    }),
+    " · 0 W — no recent energy increment",
+  );
+  assert.equal(
+    loadPowerDescription({
+      current_power_w: 423.6,
+      current_power_assumed_zero: false,
+    }),
+    " · about 424 W",
   );
 });
 

@@ -18,6 +18,18 @@ def without_legacy_utility(options: dict[str, Any]) -> dict[str, Any]:
 def current_options(options: dict[str, Any]) -> dict[str, Any]:
     """Normalize retired fields and fail-safe removed binary-source configs."""
     normalized = without_legacy_utility(options)
+    normalized["loads"] = [
+        {
+            **load,
+            "power_zero_after_minutes": load.get(
+                "power_zero_after_minutes",
+                15.0,
+            ),
+        }
+        for load in normalized.get("loads", [])
+    ]
+    normalized.setdefault("probe_grid_import_allowance_w", 0.0)
+    normalized.setdefault("probe_max_fallback_energy_wh", 0.0)
     if normalized.get("source_type") == "binary":
         normalized["source_type"] = "production_consumption"
         normalized["enabled"] = False
@@ -57,4 +69,12 @@ def version_5_options(options: dict[str, Any]) -> dict[str, Any]:
     normalized.pop("feedback_sample_interval_minutes", None)
     normalized.setdefault("feedback_timeout_minutes", 15.0)
     normalized.setdefault("input_max_age_minutes", 15.0)
+    return normalized
+
+
+def version_6_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Add bounded probe fallback and derivative-power expiry."""
+    normalized = current_options(options)
+    if normalized.get("source_type") == "curtailed_production":
+        normalized["enabled"] = False
     return normalized

@@ -13,7 +13,7 @@ PLATFORMS: Final[list[Platform]] = [
     Platform.SWITCH,
 ]
 
-PANEL_VERSION: Final = "0.8.0"
+PANEL_VERSION: Final = "0.9.0"
 PANEL_URL: Final = "/solar_spender/solar-spender-panel.js"
 PANEL_MODULE_URL: Final = f"{PANEL_URL}?v={PANEL_VERSION}"
 PANEL_COMPONENT: Final = "solar-spender-panel"
@@ -40,6 +40,8 @@ CONF_FEEDBACK_TIMEOUT_MINUTES: Final = "feedback_timeout_minutes"
 CONF_INPUT_MAX_AGE_MINUTES: Final = "input_max_age_minutes"
 CONF_NEXT_LOAD_DELAY_MINUTES: Final = "next_load_delay_minutes"
 CONF_LOADS: Final = "loads"
+CONF_PROBE_GRID_IMPORT_ALLOWANCE_W: Final = "probe_grid_import_allowance_w"
+CONF_PROBE_MAX_FALLBACK_ENERGY_WH: Final = "probe_max_fallback_energy_wh"
 CONF_BATTERY_POLICY: Final = "battery_policy"
 CONF_BATTERY_SOC_ENTITY_ID: Final = "battery_soc_entity_id"
 CONF_BATTERY_STATUS_ENTITY_ID: Final = "battery_status_entity_id"
@@ -95,6 +97,8 @@ DEFAULT_OPTIONS: Final = {
     CONF_INPUT_MAX_AGE_MINUTES: 15.0,
     CONF_NEXT_LOAD_DELAY_MINUTES: 5.0,
     CONF_LOADS: [],
+    CONF_PROBE_GRID_IMPORT_ALLOWANCE_W: 0.0,
+    CONF_PROBE_MAX_FALLBACK_ENERGY_WH: 0.0,
     CONF_BATTERY_POLICY: BATTERY_DISABLED,
     CONF_BATTERY_SOC_ENTITY_ID: "",
     CONF_BATTERY_STATUS_ENTITY_ID: "",

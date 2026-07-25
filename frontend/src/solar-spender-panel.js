@@ -4,6 +4,7 @@ import {
   batteryConfigurationVisibility,
   batteryPolicyDescription,
   constrainNumberValue,
+  loadPowerDescription,
   loadOwnershipPresentation,
   relevantBatterySocEntityIds,
   relevantBatteryStatusEntityIds,
@@ -31,6 +32,8 @@ const DEFAULT_OPTIONS = {
   feedback_timeout_minutes: 15,
   input_max_age_minutes: 15,
   next_load_delay_minutes: 5,
+  probe_grid_import_allowance_w: 0,
+  probe_max_fallback_energy_wh: 0,
   loads: [],
   battery_policy: "disabled",
   battery_soc_entity_id: "",
@@ -44,7 +47,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.8.0";
+const PANEL_VERSION = "0.9.0";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
@@ -400,6 +403,7 @@ class SolarSpenderPanelHost extends HTMLElement {
         ${this._card("Spare solar", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status), "mdi:weather-sunny")}
         ${this._card("Battery check", cards.battery.value, cards.battery.detail, "mdi:battery-medium")}
         ${this._card("AC check", cards.feedback.value, cards.feedback.detail, "mdi:air-conditioner")}
+        ${this._card("Probe fallback", this._probeBudget(status), this._probeDetail(status), "mdi:transmission-tower-import")}
         ${this._card("Solar limit", this._learnedRange(status), "Rough limit for the current period of spare solar.", "mdi:gauge")}
         ${this._card("ACs", `${status.owned_loads?.length || 0} owned`, status.discarded_lease_count ? `${status.discarded_lease_count} saved AC state(s) could not be trusted. Those ACs were left alone.` : status.restored_lease_count ? `${status.restored_lease_count} owned AC(s) restored after restart.` : "Solar Spender turns off only ACs it turned on.", "mdi:home-lightning-bolt")}
       </div>
@@ -480,6 +484,8 @@ class SolarSpenderPanelHost extends HTMLElement {
           if (options.entry_threshold_w === options.exit_threshold_w) {
             options.exit_threshold_w += 200;
           }
+          options.battery_policy = "full_idle_for_probe";
+          options.battery_direction_source = "power";
         } else if (
           key === "source_type"
           && previousSource === "curtailed_production"
@@ -766,7 +772,7 @@ class SolarSpenderPanelHost extends HTMLElement {
     return `Paused for about ${minutes} more minute${minutes === 1 ? "" : "s"}. ACs stay as they are.`;
   }
 
-  _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, power_entity_id: "", min_on_seconds: 300, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
+  _addLoad() { const options = this._collectOptions(); options.loads.push({ entity_id: "", hvac_mode: "dry", temperature: null, fan_mode: null, priority: 100, expected_power_w: null, power_entity_id: "", power_zero_after_minutes: 15, min_on_seconds: 300, min_off_seconds: 900, enabled: true }); this._options = options; this._render(); }
   _removeLoad(index) { const options = this._collectOptions(); options.loads.splice(index, 1); this._options = options; this._render(); }
   _entityField(key, label, help) { return `${this._label(label)}<ha-selector data-key="${key}"></ha-selector>${this._help(help)}`; }
   _numberField(key, label, help, min, max, unit, step = 1) {
@@ -802,12 +808,17 @@ class SolarSpenderPanelHost extends HTMLElement {
         <div class="col-md-6">${this._entityField("production_entity_id", "Solar power sensor", "Current solar production in W or kW.")}</div>
         <div class="col-md-6">${this._entityField("consumption_entity_id", "Home power sensor", "Current whole-home use in W or kW.")}</div>
         ${visibility.curtailed
-          ? `<div class="col-md-4">${this._numberField("minimum_production_w", "Minimum solar power", "Do not test an AC below this solar power.", 0, null, "W")}</div>`
+          ? `
+            <div class="col-md-6">${this._entityField("grid_entity_id", "Grid feedback sensor", "Signed grid power used to prove that a probe is not importing too much.")}</div>
+            <div class="col-md-6">${this._selectField("grid_export_positive", "Grid sensor direction", "Choose which sign means export. Import-only sensors normally use “Import is positive”.")}</div>
+            <div class="col-md-4">${this._numberField("probe_grid_import_allowance_w", "Allowed grid import", "Normal background import allowed after a probe settles. Only import above this counts as fallback.", 0, null, "W")}</div>
+            <div class="col-md-4">${this._numberField("probe_max_fallback_energy_wh", "Fallback energy budget", "Maximum measured grid-plus-battery energy a single probe may use. Must be positive before enabling.", 0, null, "Wh")}</div>
+            <div class="col-md-4">${this._numberField("minimum_production_w", "Minimum solar power", "Do not test an AC below this solar power.", 0, null, "W")}</div>`
           : ""}
         <div class="${visibility.curtailed ? "col-md-4" : "col-md-6"}">${this._numberField("entry_threshold_w", entryLabel, entryHelp, 0, null, "W")}</div>
         <div class="${visibility.curtailed ? "col-md-4" : "col-md-6"}">${this._numberField("exit_threshold_w", exitLabel, exitHelp, 0, null, "W")}</div>
         ${visibility.curtailed
-          ? `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Gap = home use − solar.</strong> Test at ${this._escape(this._options.entry_threshold_w)} W or less. Stop at ${this._escape(this._options.exit_threshold_w)} W or more.</div></div><div class="col-12"><div class="alert alert-warning mb-0">A small gap does not prove spare solar exists. The battery must be full and idle. Solar Spender tests only one AC at a time.</div></div>`
+          ? `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Gap = home use − solar.</strong> Test at ${this._escape(this._options.entry_threshold_w)} W or less. Stop at ${this._escape(this._options.exit_threshold_w)} W or more.</div></div><div class="col-12"><div class="alert alert-warning mb-0">A small gap does not prove spare solar exists. Numeric grid and battery power feedback are required, the battery must be full and idle, and Solar Spender tests only one AC at a time.</div></div>`
           : `<div class="col-12"><div class="alert alert-secondary mb-0"><strong>Spare solar = solar − home use.</strong> Start at the higher value. Stop at the lower value.</div></div>`}`;
     }
     return `
@@ -880,8 +891,9 @@ class SolarSpenderPanelHost extends HTMLElement {
           <div class="col-md-6">${this._loadSelect(index, "fan_mode", "Fan", "Fan setting to use. Leave unchanged if you do not care.")}</div>
           <div class="col-md-6">${this._loadNumber(index, "temperature", "Temperature", `Choose ${capabilities.minTemp}–${capabilities.maxTemp} °C, or leave it unchanged.`, capabilities.minTemp, capabilities.maxTemp, "°C", capabilities.tempStep)}</div>
           <div class="col-md-6">${this._loadNumber(index, "priority", "Start order", "Lower numbers start first.", 0, null, "")}</div>
-          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Usual power", "Estimated power used by this AC. Optional.", 1, null, "W")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "expected_power_w", "Usual power", this._options.source_type === "curtailed_production" ? "Required conservative AC power used to check the probe budget before startup." : "Estimated power used by this AC. Optional.", 1, null, "W")}</div>
           <div class="col-md-6">${this._label("AC power sensor")}<ha-selector data-load-power-index="${index}"></ha-selector>${this._help("Current power used by this AC in W or kW. Optional.")}</div>
+          <div class="col-md-6">${this._loadNumber(index, "power_zero_after_minutes", "Assume zero after", "For power derived from a Wh counter: if it stops reporting for this long, treat the AC draw as 0 W.", 1, 1440, "minutes")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_on_seconds", "Keep on for", "Shortest time Solar Spender may leave the AC on.", 0, null, "seconds")}</div>
           <div class="col-md-6">${this._loadNumber(index, "min_off_seconds", "Keep off for", "Shortest wait before Solar Spender may start the AC again.", 0, null, "seconds")}</div>
         </div></div></ha-card>`;
@@ -899,13 +911,31 @@ class SolarSpenderPanelHost extends HTMLElement {
   _card(title, value, detail, icon) { return `<div class="col-12 col-sm-6 col-xl"><ha-card class="status-card"><div class="card-content"><div class="status-title text-body-secondary small"><ha-icon icon="${icon}" aria-hidden="true"></ha-icon><span>${this._escape(title)}</span></div><div class="fs-4 fw-semibold mt-1">${this._escape(value)}</div><div class="small text-body-secondary text-break">${this._escape(detail)}</div></div></ha-card></div>`; }
   _loads(loads) { return loads.length ? `<ul class="list-group list-group-flush">${loads.map((load) => {
     const ownership = loadOwnershipPresentation(load);
-    const draw = typeof load.current_power_w === "number"
-      ? ` · about ${Math.round(load.current_power_w)} W`
-      : "";
+    const draw = loadPowerDescription(load);
     return `<li class="list-group-item px-0 d-flex justify-content-between gap-3"><span class="text-break"><span class="d-block">${this._escape(load.entity_id)}</span><span class="small text-body-secondary">${this._escape((load.ownership_reason || "Status unavailable") + draw)}</span></span><span class="badge align-self-start text-bg-${ownership.style}">${this._escape(ownership.label)}</span></li>`;
   }).join("")}</ul>` : `<p class="text-body-secondary mb-0">No ACs added.</p>`; }
   _history(history) { return history.length ? `<ul class="list-group list-group-flush">${history.slice().reverse().map((item) => `<li class="list-group-item px-0 small"><div>${this._escape(item.message)}</div><div class="text-body-secondary">${this._escape(item.at)}</div></li>`).join("")}</ul>` : `<p class="text-body-secondary mb-0">No decisions yet.</p>`; }
   _watts(value) { return typeof value === "number" ? `${Math.round(value)} W` : "—"; }
+  _probeBudget(status) {
+    const probe = status.probe || {};
+    if (this._options.source_type !== "curtailed_production") return "Not used";
+    return probe.active
+      ? `${Number(probe.fallback_energy_wh || 0).toFixed(1)} / ${Number(probe.fallback_energy_limit_wh || 0).toFixed(1)} Wh`
+      : `${Number(probe.fallback_energy_limit_wh || 0).toFixed(1)} Wh limit`;
+  }
+  _probeDetail(status) {
+    const probe = status.probe || {};
+    if (this._options.source_type !== "curtailed_production") {
+      return "Used only for zero-export testing.";
+    }
+    const grid = typeof probe.grid_import_w === "number"
+      ? `${Math.round(probe.grid_import_w)} W grid import`
+      : "grid unavailable";
+    const battery = typeof probe.battery_discharge_w === "number"
+      ? `${Math.round(probe.battery_discharge_w)} W battery draw`
+      : "battery unavailable";
+    return `${grid} · ${battery}`;
+  }
   _learnedRange(status) {
     const lower = status.learned_range?.supported_at_least_w;
     const upper = status.learned_range?.unsupported_at_or_above_w;

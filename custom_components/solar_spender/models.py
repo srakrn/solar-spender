@@ -42,6 +42,8 @@ from .const import (
     CONF_MINIMUM_PRODUCTION_W,
     CONF_NEXT_LOAD_DELAY_MINUTES,
     CONF_PRODUCTION_ENTITY_ID,
+    CONF_PROBE_GRID_IMPORT_ALLOWANCE_W,
+    CONF_PROBE_MAX_FALLBACK_ENERGY_WH,
     CONF_SETTLING_SECONDS,
     CONF_SOURCE_TYPE,
     DEFAULT_OPTIONS,
@@ -64,6 +66,7 @@ class LoadConfig:
     fan_mode: str | None
     expected_power_w: float | None
     power_entity_id: str
+    power_zero_after_minutes: float
     min_on_seconds: int
     min_off_seconds: int
     enabled: bool
@@ -95,6 +98,22 @@ class LoadConfig:
                 raise ConfigurationError(
                     "Choose a sensor for AC power."
                 )
+        try:
+            power_zero_after_minutes = float(
+                value.get("power_zero_after_minutes", 15.0)
+            )
+        except (TypeError, ValueError) as err:
+            raise ConfigurationError(
+                "Assume-zero time must be a number of minutes."
+            ) from err
+        if (
+            not isfinite(power_zero_after_minutes)
+            or power_zero_after_minutes < 1
+            or power_zero_after_minutes > 1440
+        ):
+            raise ConfigurationError(
+                "Assume-zero time must be from 1 to 1440 minutes."
+            )
         min_on_seconds = int(value.get("min_on_seconds", 300))
         min_off_seconds = int(value.get("min_off_seconds", 900))
         if min_on_seconds < 0 or min_off_seconds < 0:
@@ -107,6 +126,7 @@ class LoadConfig:
             fan_mode=fan_mode,
             expected_power_w=expected_power_w,
             power_entity_id=power_entity_id,
+            power_zero_after_minutes=power_zero_after_minutes,
             min_on_seconds=min_on_seconds,
             min_off_seconds=min_off_seconds,
             enabled=bool(value.get("enabled", True)),
@@ -133,6 +153,8 @@ class SolarSpenderConfig:
     input_max_age_minutes: float
     next_load_delay_minutes: float
     loads: tuple[LoadConfig, ...]
+    probe_grid_import_allowance_w: float
+    probe_max_fallback_energy_wh: float
     battery_policy: str
     battery_soc_entity_id: str
     battery_status_entity_id: str
@@ -203,6 +225,31 @@ class SolarSpenderConfig:
         entity_ids = [load.entity_id for load in loads]
         if len(entity_ids) != len(set(entity_ids)):
             raise ConfigurationError("Each AC can be added only once.")
+        try:
+            probe_grid_import_allowance_w = float(
+                merged[CONF_PROBE_GRID_IMPORT_ALLOWANCE_W]
+            )
+            probe_max_fallback_energy_wh = float(
+                merged[CONF_PROBE_MAX_FALLBACK_ENERGY_WH]
+            )
+        except (TypeError, ValueError) as err:
+            raise ConfigurationError(
+                "Probe grid allowance and fallback energy must be numbers."
+            ) from err
+        if (
+            not isfinite(probe_grid_import_allowance_w)
+            or probe_grid_import_allowance_w < 0
+        ):
+            raise ConfigurationError(
+                "Allowed background grid import cannot be negative."
+            )
+        if (
+            not isfinite(probe_max_fallback_energy_wh)
+            or probe_max_fallback_energy_wh < 0
+        ):
+            raise ConfigurationError(
+                "Maximum probe fallback energy cannot be negative."
+            )
         battery_policy = str(merged[CONF_BATTERY_POLICY])
         if battery_policy not in BATTERY_POLICIES:
             raise ConfigurationError("Choose a valid battery rule.")
@@ -241,6 +288,8 @@ class SolarSpenderConfig:
             input_max_age_minutes=input_max_age,
             next_load_delay_minutes=next_load_delay,
             loads=loads,
+            probe_grid_import_allowance_w=probe_grid_import_allowance_w,
+            probe_max_fallback_energy_wh=probe_max_fallback_energy_wh,
             battery_policy=battery_policy,
             battery_soc_entity_id=str(merged[CONF_BATTERY_SOC_ENTITY_ID]),
             battery_status_entity_id=str(merged[CONF_BATTERY_STATUS_ENTITY_ID]),
@@ -275,6 +324,30 @@ class SolarSpenderConfig:
             if self.battery_policy != BATTERY_FULL_IDLE_FOR_PROBE:
                 raise ConfigurationError(
                     "Zero-export systems require the “Full and idle” battery rule."
+                )
+            if not self.grid_entity_id:
+                raise ConfigurationError(
+                    "Choose a grid power sensor for zero-export testing."
+                )
+            if (
+                self.battery_direction_source != BATTERY_DIRECTION_POWER
+                or not self.battery_power_entity_id
+            ):
+                raise ConfigurationError(
+                    "Zero-export testing requires a battery power sensor."
+                )
+            if self.probe_max_fallback_energy_wh <= 0:
+                raise ConfigurationError(
+                    "Set a positive maximum fallback energy before enabling "
+                    "zero-export testing."
+                )
+            if any(
+                load.enabled and load.expected_power_w is None
+                for load in self.loads
+            ):
+                raise ConfigurationError(
+                    "Set usual power for every enabled AC used for "
+                    "zero-export testing."
                 )
         if self.battery_policy == BATTERY_DISABLED:
             return
