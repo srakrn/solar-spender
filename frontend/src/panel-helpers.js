@@ -104,8 +104,11 @@ export function statusPresentations(status, options) {
         },
     surplus: status?.source_valid
       ? {
-          value: status?.surplus_available ? "Available" : "Unavailable",
-          detail: null,
+          value: status?.waste_headroom_available ? "Available" : "Unavailable",
+          detail: status?.surplus_available
+            && !status?.waste_headroom_available
+            ? "The solar source qualifies, but the configured battery still has first claim on the power."
+            : null,
         }
       : {
           value: "Unknown",

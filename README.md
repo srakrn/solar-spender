@@ -11,7 +11,7 @@ Solar Spender requires Home Assistant 2025.5 or newer for fresh same-value
 sensor-report tracking.
 
 The integration creates a Solar Spender device with an Automation switch, a
-read-only Solar headroom binary sensor, and number entities for its global
+read-only Waste headroom binary sensor, and number entities for its global
 confirmation timing. The headroom sensor continues evaluating while automation
 is disabled. These entities can be used from dashboards and automations; source
 wiring and AC profiles remain in the sidebar panel.
@@ -67,3 +67,8 @@ valid source and load options are saved and automation is enabled.
 - Zero-export solar testing requires a configured full-and-idle battery gate.
 - Battery direction can use a status entity or a signed W/kW power sensor with
   a configurable idle threshold.
+- Waste headroom is off while a configured battery is charging, discharging, or
+  not yet eligible; charging the battery is useful solar consumption, not waste.
+- Confirmed ownership leases, timing deadlines, cycle blocks, and recent
+  decisions survive restart. A lease is recovered only if the AC still matches
+  Solar Spender's exact commanded profile; ambiguous ACs are left untouched.

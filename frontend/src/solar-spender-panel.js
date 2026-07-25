@@ -43,7 +43,7 @@ const DEFAULT_OPTIONS = {
   discharging_states: ["discharging"],
 };
 
-const PANEL_VERSION = "0.5.0";
+const PANEL_VERSION = "0.6.0";
 const KEEP_CURRENT = "__keep_current__";
 
 const SELECT_OPTIONS = {
@@ -204,11 +204,11 @@ class SolarSpenderPanelHost extends HTMLElement {
       </div>
       <div class="row g-3 mb-3">
         ${this._card("Solar Spender", cards.controller.value, cards.controller.detail)}
-        ${this._card("Solar headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
+        ${this._card("Waste headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
         ${this._card("Battery condition", cards.battery.value, cards.battery.detail)}
         ${this._card("Source feedback", cards.feedback.value, cards.feedback.detail)}
         ${this._card("Learned capacity", this._learnedRange(status), "Temporary estimate for the current solar opportunity.")}
-        ${this._card("Solar Spender ACs", `${status.owned_loads?.length || 0} owned`, "Only ACs started by Solar Spender can be released automatically.")}
+        ${this._card("Solar Spender ACs", `${status.owned_loads?.length || 0} owned`, status.discarded_lease_count ? `${status.discarded_lease_count} ambiguous lease(s) were not restored; those ACs were left untouched.` : status.restored_lease_count ? `${status.restored_lease_count} lease(s) recovered after restart or reload. Only profile-matched leases are restored.` : "Only ACs started by Solar Spender can be released automatically.")}
       </div>
       <div class="row g-3">
         <section class="col-12 col-xxl-8"><ha-card><div class="card-content">

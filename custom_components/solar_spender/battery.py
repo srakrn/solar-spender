@@ -32,3 +32,22 @@ def direction_from_power(
     else:
         direction = BATTERY_IDLE
     return BatteryPowerDirection(direction, normalized_w)
+
+
+def waste_headroom_available(
+    *,
+    source_valid: bool,
+    surplus_available: bool,
+    battery_configured: bool,
+    battery_allowed: bool,
+    battery_direction: str,
+) -> bool:
+    """Exclude solar still claimed by a configured battery."""
+    if not source_valid or not surplus_available:
+        return False
+    if not battery_configured:
+        return True
+    return (
+        battery_allowed
+        and battery_direction not in {"charging", "discharging", "unknown"}
+    )

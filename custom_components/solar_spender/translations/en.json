@@ -18,7 +18,7 @@
   "entity": {
     "binary_sensor": {
       "headroom": {
-        "name": "Headroom"
+        "name": "Waste headroom"
       }
     },
     "switch": {

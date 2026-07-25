@@ -116,6 +116,9 @@ Use these terms consistently:
 - **supported probe**: after settling, the added demand is supplied without
   exceeding configured grid-import or battery-discharge limits.
 - **battery gate**: optional condition that can prevent new activation.
+- **waste headroom**: a valid, latched source opportunity after accounting for
+  the configured battery's first claim. Charging, discharging, unknown battery
+  direction, or an unsatisfied battery gate means no waste headroom.
 - **probe-ready battery**: SOC is at/above the configured full threshold and
   the battery is neither charging nor discharging.
 - **load**: one configured AC plus its desired profile and priority.
@@ -349,8 +352,9 @@ theme variables. It needs:
 
 - current state, raw source value, hysteresis-latched surplus, calculated watts,
   battery gate, and relevant per-load deadlines;
-- a read-only Home Assistant binary sensor for valid, latched solar headroom
-  which continues evaluating while automation is disabled;
+- a read-only Home Assistant binary sensor for waste headroom which continues
+  evaluating while automation is disabled; when battery feedback is configured,
+  source opportunity alone is insufficient while the battery is charging;
 - enabled/pause control with clear semantics;
 - source and battery configuration;
 - feedback/probing strategy and measurement confidence;

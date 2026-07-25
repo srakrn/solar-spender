@@ -149,9 +149,11 @@ entry deficit, higher exit deficit, and a separate minimum-production guard.
 The runtime timing controls are also exposed under one Solar Spender device as
 Home Assistant entities: an Automation switch and number entities for first
 check delay, confirmation checks, check spacing, and the delay before the next
-AC. A read-only Solar headroom binary sensor exposes the valid, latched source
-decision even while automation is disabled. Source wiring and per-AC profiles
-remain panel configuration.
+AC. A read-only Waste headroom binary sensor exposes whether the valid, latched
+source opportunity would otherwise remain unused, even while automation is
+disabled. When battery feedback is configured, charging, discharging, unknown
+direction, or an unsatisfied gate keeps that sensor off. Source wiring and
+per-AC profiles remain panel configuration.
 
 ### Source: grid-flow mode
 
@@ -384,6 +386,13 @@ An ownership lease records entity ID, command/profile fingerprint, activation
 time, last observed matching state, controller generation, and a pre-activation
 snapshot of the controllable fields Solar Spender changed. It does not grant
 permission to overwrite future user intent.
+
+Confirmed leases, minimum-off timestamps, per-cycle blocks, next-load deadline,
+and recent decision history are stored atomically. After restart, restore a
+lease only when the AC is still configured, available, running, and matches
+every field Solar Spender previously commanded. A changed or ambiguous AC is
+left untouched and reported as a discarded lease. Restored leases must pass a
+new fresh-feedback barrier before another AC may start.
 
 While owned, an observed off state or a material profile change not initiated by
 the controller relinquishes the lease. Compare only configured command fields:

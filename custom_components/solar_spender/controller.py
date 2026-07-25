@@ -21,7 +21,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
-from .battery import direction_from_power
+from .battery import direction_from_power, waste_headroom_available
 from .const import (
     BATTERY_CHARGING_OR_SOC,
     BATTERY_DIRECTION_POWER,
@@ -47,11 +47,16 @@ from .feedback import (
 )
 from .models import LoadConfig, SolarSpenderConfig
 from .selection import best_to_release_for_shortfall, first_to_activate
+from .runtime import (
+    climate_matches_commanded_profile,
+    load_definition_matches_profile,
+    parse_aware_datetime,
+)
 from .source import (
     observable_surplus_available,
     zero_export_opportunity_available,
 )
-from .storage import LearningStore
+from .storage import LearningStore, RuntimeStore
 
 _INVALID_STATES = {STATE_UNKNOWN, STATE_UNAVAILABLE}
 
@@ -101,10 +106,14 @@ class SolarSpenderController:
         self._event_history: list[dict[str, str]] = []
         self._learning_store = LearningStore(hass, entry_id)
         self._learned_draws: dict[str, LearnedDrawEstimate] = {}
+        self._runtime_store = RuntimeStore(hass, entry_id)
+        self._restored_lease_count = 0
+        self._discarded_lease_count = 0
 
     async def async_start(self) -> None:
         """Subscribe to all configured entities and evaluate initial state."""
         self._learned_draws = await self._learning_store.async_load()
+        self._restore_runtime_state(await self._runtime_store.async_load())
         entity_ids = self._watched_entities()
         for entity_id in self._feedback_entity_ids:
             if (state := self.hass.states.get(entity_id)) is not None:
@@ -121,6 +130,22 @@ class SolarSpenderController:
                     event_filter=self._is_feedback_report,
                 )
             )
+        if self._leases:
+            now = datetime.now().astimezone()
+            self._feedback_assessment = FeedbackAssessment(
+                action="recovery",
+                load_entity_id="restored leases",
+                next_not_before=now + timedelta(seconds=self.config.settling_seconds),
+                required_entities=self._feedback_entity_ids,
+                sample_count=self.config.feedback_sample_count,
+                sample_interval=timedelta(
+                    minutes=self.config.feedback_sample_interval_minutes
+                ),
+            )
+            self._record(
+                f"Restored {len(self._leases)} confirmed lease(s); "
+                "waiting for fresh source feedback"
+            )
         await self.async_reconcile("started")
 
     async def async_stop(self) -> None:
@@ -131,6 +156,7 @@ class SolarSpenderController:
         if self._scheduled is not None:
             self._scheduled()
             self._scheduled = None
+        await self._runtime_store.async_save(self._runtime_payload())
 
     async def async_apply_runtime_config(self, config: SolarSpenderConfig) -> None:
         """Apply options exposed as entities without dropping active leases."""
@@ -242,6 +268,10 @@ class SolarSpenderController:
                         "source became invalid during confirmation",
                         target_entity_id=assessment.load_entity_id,
                     )
+                elif assessment.action == "recovery" and self._leases:
+                    await self._async_shed_one(
+                        "source invalid after restart recovery"
+                    )
                 return
             if (
                 self._feedback_assessment is not None
@@ -325,6 +355,11 @@ class SolarSpenderController:
                     await self._async_shed_one(
                         "activation failed majority confirmation",
                         target_entity_id=assessment.load_entity_id,
+                    )
+                    return
+                if assessment.action == "recovery" and not assessment.supported:
+                    await self._async_shed_one(
+                        "post-restart feedback found no solar opportunity"
                     )
                     return
                 if not assessment.supported:
@@ -489,12 +524,8 @@ class SolarSpenderController:
             self.battery_power_w = None
             return True, "battery policy disabled"
         status = self._battery_direction()
-        if config.battery_direction_source == BATTERY_DIRECTION_POWER:
-            charging = status == "charging"
-            discharging = status == "discharging"
-        else:
-            charging = status in config.charging_states
-            discharging = status in config.discharging_states
+        charging = status == "charging"
+        discharging = status == "discharging"
         soc = self._numeric_state(config.battery_soc_entity_id)
         if config.battery_policy == BATTERY_REQUIRE_CHARGING:
             return charging, "battery is not charging"
@@ -541,10 +572,27 @@ class SolarSpenderController:
         ):
             direction = "charging" if state.state == "on" else "idle"
         else:
-            direction = state.state.lower()
+            raw_direction = state.state.lower()
+            if raw_direction in self.config.charging_states:
+                direction = "charging"
+            elif raw_direction in self.config.discharging_states:
+                direction = "discharging"
+            else:
+                direction = raw_direction
         self.battery_direction = direction
         self.battery_power_w = None
         return direction
+
+    @property
+    def waste_headroom_available(self) -> bool:
+        """Return whether qualified solar would otherwise remain unused."""
+        return waste_headroom_available(
+            source_valid=self.source_valid,
+            surplus_available=self.surplus_available,
+            battery_configured=self.config.battery_policy != BATTERY_DISABLED,
+            battery_allowed=self.battery_allowed,
+            battery_direction=self.battery_direction,
+        )
 
     def _numeric_state(self, entity_id: str) -> float | None:
         state = self.hass.states.get(entity_id)
@@ -1009,6 +1057,166 @@ class SolarSpenderController:
             message=message,
             at=datetime.now().astimezone(),
         )
+        self._runtime_store.async_delay_save(self._runtime_payload)
+
+    def _runtime_payload(self) -> dict[str, Any]:
+        """Serialize only state needed for safe continuation after restart."""
+        return {
+            "saved_at": datetime.now().astimezone().isoformat(),
+            "leases": {
+                entity_id: {
+                    "activated_at": lease.activated_at.isoformat(),
+                    "commanded_profile": lease.commanded_profile,
+                    "previous_profile": lease.previous_profile,
+                }
+                for entity_id, lease in self._leases.items()
+            },
+            "last_off": {
+                entity_id: value.isoformat()
+                for entity_id, value in self._last_off.items()
+            },
+            "next_load_not_before": (
+                self._next_load_not_before.isoformat()
+                if self._next_load_not_before is not None
+                else None
+            ),
+            "cycle_memory": {
+                "blocked_loads": sorted(self._cycle_memory.blocked_loads),
+                "supported_combinations": [
+                    sorted(value)
+                    for value in self._cycle_memory.supported_combinations
+                ],
+                "unsupported_combinations": [
+                    sorted(value)
+                    for value in self._cycle_memory.unsupported_combinations
+                ],
+                "lower_supported_w": self._cycle_memory.lower_supported_w,
+                "upper_unsupported_w": self._cycle_memory.upper_unsupported_w,
+            },
+            "pending_unsupported_release": self._pending_unsupported_release,
+            "history": self._event_history,
+        }
+
+    def _restore_runtime_state(self, data: dict[str, Any]) -> None:
+        """Restore only unambiguous leases and valid wall-clock deadlines."""
+        configured_loads = {load.entity_id: load for load in self.config.loads}
+        now = datetime.now().astimezone()
+        history = data.get("history")
+        if isinstance(history, list):
+            self._event_history = [
+                {"at": str(item["at"]), "message": str(item["message"])}
+                for item in history[-30:]
+                if isinstance(item, dict)
+                and isinstance(item.get("at"), str)
+                and isinstance(item.get("message"), str)
+            ]
+        last_off = data.get("last_off")
+        if isinstance(last_off, dict):
+            for entity_id, value in last_off.items():
+                parsed = parse_aware_datetime(value)
+                if (
+                    isinstance(entity_id, str)
+                    and entity_id in configured_loads
+                    and parsed is not None
+                ):
+                    self._last_off[entity_id] = parsed
+        next_load_not_before = parse_aware_datetime(
+            data.get("next_load_not_before")
+        )
+        if next_load_not_before is not None and next_load_not_before > now:
+            self._next_load_not_before = next_load_not_before
+        leases = data.get("leases")
+        persisted_lease_count = len(leases) if isinstance(leases, dict) else 0
+        if isinstance(leases, dict):
+            for entity_id, value in leases.items():
+                if not isinstance(entity_id, str):
+                    continue
+                load = configured_loads.get(entity_id)
+                state = self.hass.states.get(entity_id)
+                if (
+                    load is None
+                    or not isinstance(value, dict)
+                    or state is None
+                    or state.state in _INVALID_STATES
+                    or state.state == STATE_OFF
+                ):
+                    continue
+                activated_at = parse_aware_datetime(value.get("activated_at"))
+                commanded_profile = value.get("commanded_profile")
+                previous_profile = value.get("previous_profile")
+                if (
+                    activated_at is None
+                    or activated_at > now + timedelta(minutes=5)
+                    or not isinstance(commanded_profile, dict)
+                    or not isinstance(previous_profile, dict)
+                    or not load_definition_matches_profile(
+                        hvac_mode=load.hvac_mode,
+                        temperature=load.temperature,
+                        fan_mode=load.fan_mode,
+                        commanded_profile=commanded_profile,
+                    )
+                    or not climate_matches_commanded_profile(
+                        state.state,
+                        state.attributes,
+                        commanded_profile,
+                    )
+                ):
+                    continue
+                self._leases[entity_id] = Lease(
+                    load=load,
+                    activated_at=activated_at,
+                    commanded_profile=commanded_profile,
+                    previous_profile=previous_profile,
+                )
+        self._restored_lease_count = len(self._leases)
+        self._discarded_lease_count = (
+            persisted_lease_count - self._restored_lease_count
+        )
+        if self._discarded_lease_count:
+            self._record(
+                f"Did not restore {self._discarded_lease_count} ambiguous "
+                "lease(s); affected ACs were left untouched"
+            )
+        cycle = data.get("cycle_memory")
+        if isinstance(cycle, dict):
+            configured_ids = set(configured_loads)
+            blocked_values = cycle.get("blocked_loads", [])
+            if not isinstance(blocked_values, list):
+                blocked_values = []
+            supported_values = cycle.get("supported_combinations", [])
+            if not isinstance(supported_values, list):
+                supported_values = []
+            unsupported_values = cycle.get("unsupported_combinations", [])
+            if not isinstance(unsupported_values, list):
+                unsupported_values = []
+            self._cycle_memory.blocked_loads = {
+                str(value)
+                for value in blocked_values
+                if str(value) in configured_ids
+            }
+            self._cycle_memory.supported_combinations = {
+                frozenset(str(entity_id) for entity_id in value)
+                for value in supported_values
+                if isinstance(value, list)
+                and all(str(entity_id) in configured_ids for entity_id in value)
+            }
+            self._cycle_memory.unsupported_combinations = {
+                frozenset(str(entity_id) for entity_id in value)
+                for value in unsupported_values
+                if isinstance(value, list)
+                and all(str(entity_id) in configured_ids for entity_id in value)
+            }
+            for attribute in ("lower_supported_w", "upper_unsupported_w"):
+                value = cycle.get(attribute)
+                if (
+                    isinstance(value, (int, float))
+                    and isfinite(value)
+                    and value >= 0
+                ):
+                    setattr(self._cycle_memory, attribute, float(value))
+        pending_release = data.get("pending_unsupported_release")
+        if isinstance(pending_release, str) and pending_release in self._leases:
+            self._pending_unsupported_release = pending_release
 
     def _load_status(self, load: LoadConfig) -> dict[str, Any]:
         """Explain ownership and current eligibility for one configured AC."""
@@ -1092,6 +1300,7 @@ class SolarSpenderController:
             "raw_source_value": self.raw_source_value,
             "source_valid": self.source_valid,
             "surplus_available": self.surplus_available,
+            "waste_headroom_available": self.waste_headroom_available,
             "headroom_w": self.headroom_w,
             "opportunity_power_w": self.opportunity_power_w,
             "source_deficit_w": self.source_deficit_w,
@@ -1102,6 +1311,8 @@ class SolarSpenderController:
                 {"entity_id": lease.load.entity_id, "activated_at": lease.activated_at.isoformat()}
                 for lease in self._leases.values()
             ],
+            "restored_lease_count": self._restored_lease_count,
+            "discarded_lease_count": self._discarded_lease_count,
             "pending_activation": self._pending_activation[0].entity_id
             if self._pending_activation is not None
             else None,

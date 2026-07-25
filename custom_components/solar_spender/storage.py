@@ -1,7 +1,8 @@
-"""Versioned persistence for conservative learned AC draw hints."""
+"""Versioned persistence for learned hints and conservative runtime recovery."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -12,6 +13,7 @@ from .const import DOMAIN
 from .feedback import LearnedDrawEstimate
 
 _STORAGE_VERSION = 1
+_RUNTIME_STORAGE_VERSION = 1
 
 
 class LearningStore:
@@ -56,3 +58,26 @@ class LearningStore:
                 }
             }
         )
+
+
+class RuntimeStore:
+    """Persist ownership and timing state without making it configuration."""
+
+    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
+        self._store = Store[dict[str, Any]](
+            hass,
+            _RUNTIME_STORAGE_VERSION,
+            f"{DOMAIN}.runtime_{entry_id}",
+        )
+
+    async def async_load(self) -> dict[str, Any]:
+        """Load the last runtime snapshot."""
+        return await self._store.async_load() or {}
+
+    def async_delay_save(self, data_func: Callable[[], dict[str, Any]]) -> None:
+        """Coalesce frequent status updates into one atomic storage write."""
+        self._store.async_delay_save(data_func, 1.0)
+
+    async def async_save(self, data: dict[str, Any]) -> None:
+        """Immediately save the current runtime snapshot."""
+        await self._store.async_save(data)

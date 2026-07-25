@@ -58,3 +58,40 @@ class BatteryPowerDirectionTests(unittest.TestCase):
         )
 
         self.assertEqual(result.direction, "discharging")
+
+
+class WasteHeadroomTests(unittest.TestCase):
+    """Battery charging consumes solar before it becomes waste headroom."""
+
+    def test_charging_battery_removes_waste_headroom(self) -> None:
+        self.assertFalse(
+            BATTERY.waste_headroom_available(
+                source_valid=True,
+                surplus_available=True,
+                battery_configured=True,
+                battery_allowed=True,
+                battery_direction="charging",
+            )
+        )
+
+    def test_full_idle_battery_allows_waste_headroom(self) -> None:
+        self.assertTrue(
+            BATTERY.waste_headroom_available(
+                source_valid=True,
+                surplus_available=True,
+                battery_configured=True,
+                battery_allowed=True,
+                battery_direction="idle",
+            )
+        )
+
+    def test_unconfigured_battery_does_not_hide_source_headroom(self) -> None:
+        self.assertTrue(
+            BATTERY.waste_headroom_available(
+                source_valid=True,
+                surplus_available=True,
+                battery_configured=False,
+                battery_allowed=True,
+                battery_direction="not_configured",
+            )
+        )

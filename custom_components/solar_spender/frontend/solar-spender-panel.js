@@ -87,8 +87,8 @@ function statusPresentations(status, options) {
       detail: "Automation is paused. Solar Spender will not start or release ACs."
     },
     surplus: status?.source_valid ? {
-      value: status?.surplus_available ? "Available" : "Unavailable",
-      detail: null
+      value: status?.waste_headroom_available ? "Available" : "Unavailable",
+      detail: status?.surplus_available && !status?.waste_headroom_available ? "The solar source qualifies, but the configured battery still has first claim on the power." : null
     } : {
       value: "Unknown",
       detail: "The configured source is unavailable or incomplete."
@@ -176,7 +176,7 @@ var DEFAULT_OPTIONS = {
   charging_states: ["charging"],
   discharging_states: ["discharging"]
 };
-var PANEL_VERSION = "0.5.0";
+var PANEL_VERSION = "0.6.0";
 var KEEP_CURRENT = "__keep_current__";
 var SELECT_OPTIONS = {
   enabled: [["true", "Enabled"], ["false", "Disabled"]],
@@ -333,11 +333,11 @@ var SolarSpenderPanelHost = class extends HTMLElement {
       </div>
       <div class="row g-3 mb-3">
         ${this._card("Solar Spender", cards.controller.value, cards.controller.detail)}
-        ${this._card("Solar headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
+        ${this._card("Waste headroom", cards.surplus.value, cards.surplus.detail ?? this._surplusDetail(status))}
         ${this._card("Battery condition", cards.battery.value, cards.battery.detail)}
         ${this._card("Source feedback", cards.feedback.value, cards.feedback.detail)}
         ${this._card("Learned capacity", this._learnedRange(status), "Temporary estimate for the current solar opportunity.")}
-        ${this._card("Solar Spender ACs", `${status.owned_loads?.length || 0} owned`, "Only ACs started by Solar Spender can be released automatically.")}
+        ${this._card("Solar Spender ACs", `${status.owned_loads?.length || 0} owned`, status.discarded_lease_count ? `${status.discarded_lease_count} ambiguous lease(s) were not restored; those ACs were left untouched.` : status.restored_lease_count ? `${status.restored_lease_count} lease(s) recovered after restart or reload. Only profile-matched leases are restored.` : "Only ACs started by Solar Spender can be released automatically.")}
       </div>
       <div class="row g-3">
         <section class="col-12 col-xxl-8"><ha-card><div class="card-content">

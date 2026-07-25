@@ -117,12 +117,30 @@ test("headroom remains visible while automation is disabled", () => {
       state: "disabled",
       source_valid: true,
       surplus_available: true,
+      waste_headroom_available: true,
       feedback: { waiting: false },
     },
     { battery_policy: "disabled" },
   );
 
   assert.equal(cards.surplus.value, "Available");
+});
+
+test("battery charging removes waste headroom without hiding source opportunity", () => {
+  const cards = statusPresentations(
+    {
+      enabled: true,
+      source_valid: true,
+      surplus_available: true,
+      waste_headroom_available: false,
+      battery_direction: "charging",
+      feedback: { waiting: false },
+    },
+    { battery_policy: "charging_or_soc" },
+  );
+
+  assert.equal(cards.surplus.value, "Unavailable");
+  assert.match(cards.surplus.detail, /battery still has first claim/i);
 });
 
 test("source and battery modes explain the selected behavior", () => {
@@ -217,6 +235,9 @@ test("panel configuration uses Home Assistant selectors instead of native form i
   assert.match(source, /threshold is always positive/i);
   assert.match(source, /data-load-power-index/);
   assert.match(source, /Live AC power entity/);
+  assert.match(source, /Waste headroom/);
+  assert.match(source, /lease\(s\) recovered after restart or reload/);
+  assert.match(source, /ambiguous lease\(s\) were not restored/);
 });
 
 test("power entities are restricted to W and kW power sensors", () => {

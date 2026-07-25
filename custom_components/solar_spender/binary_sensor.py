@@ -26,7 +26,7 @@ async def async_setup_entry(
 
 
 class SolarSpenderHeadroomBinarySensor(BinarySensorEntity):
-    """Whether the configured solar source currently reports headroom."""
+    """Whether qualified solar would otherwise remain unused."""
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:solar-power-variant"
@@ -53,8 +53,8 @@ class SolarSpenderHeadroomBinarySensor(BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return false for invalid input and the current latched decision otherwise."""
-        return self._controller.source_valid and self._controller.surplus_available
+        """Return the waste-headroom decision, including configured battery claim."""
+        return self._controller.waste_headroom_available
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -62,9 +62,16 @@ class SolarSpenderHeadroomBinarySensor(BinarySensorEntity):
         return {
             "source_valid": self._controller.source_valid,
             "source_type": self._controller.config.source_type,
+            "source_surplus_available": self._controller.surplus_available,
+            "waste_headroom_available": (
+                self._controller.waste_headroom_available
+            ),
             "headroom_w": self._controller.headroom_w,
             "opportunity_power_w": self._controller.opportunity_power_w,
             "source_deficit_w": self._controller.source_deficit_w,
+            "battery_policy": self._controller.config.battery_policy,
+            "battery_allowed": self._controller.battery_allowed,
+            "battery_direction": self._controller.battery_direction,
             "automation_enabled": self._controller.config.enabled,
         }
 
